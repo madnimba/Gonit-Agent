@@ -10,23 +10,26 @@ from transformers import PreTrainedTokenizerBase
 
 from malt.data import Gsm8kExample, extract_gsm8k_answer, normalize_gsm8k_answer
 from malt.models.prompts import (
+    format_chat_prompt,
     build_generator_prompt,
     build_verifier_prompt,
     build_refiner_prompt,
 )
+from malt.models import (
+    set_active_role_adapter,
+    ROLE_GENERATOR,
+    ROLE_VERIFIER,
+    ROLE_REFINER,
+)
 from malt.data import SomadhanExample, extract_Somadhan_answer, normalize_Somadhan_answer
 
 
-# Union type accepted everywhere a question object is expected.
 AnyExample = Union[Gsm8kExample, SomadhanExample]
 
 
 def _get_answer_fns(
     example: AnyExample,
 ) -> tuple[Callable[[str], str], Callable[[str], str]]:
-    """
-    Return the (extract, normalize) function pair appropriate for the example type.
-    """
     if isinstance(example, SomadhanExample):
         return extract_Somadhan_answer, normalize_Somadhan_answer
     return extract_gsm8k_answer, normalize_gsm8k_answer
@@ -40,12 +43,11 @@ def _get_answer_fns(
 class InferenceConfig:
     """Configuration for inference over any supported dataset."""
 
-    max_new_tokens: int = 256
+    max_new_tokens: int = 1024
     temperature: float = 0.3
     top_p: float = 0.95
     top_k: int = 50
 
-    # Number of independent trajectories per question for majority voting.
     num_samples: int = 3
 
 
@@ -62,10 +64,18 @@ def _generate_single(
     top_p: float,
     top_k: int,
 ) -> str:
+    """
+    Generate a single completion.
+
+    *prompt* should be the raw user-message content — this function applies
+    the chat template before tokenizing.
+    """
+    formatted = format_chat_prompt(tokenizer, prompt)
+
     model.eval()
     with torch.no_grad():
         inputs = tokenizer(
-            prompt,
+            formatted,
             return_tensors="pt",
             truncation=True,
             padding=True,
@@ -90,7 +100,7 @@ def _generate_single(
 
 
 # ---------------------------------------------------------------------------
-# Shared majority-vote helper
+# Majority-vote helper
 # ---------------------------------------------------------------------------
 
 def _majority_vote(
@@ -98,10 +108,6 @@ def _majority_vote(
     extract_fn: Callable[[str], str],
     normalize_fn: Callable[[str], str],
 ) -> str:
-    """
-    Given a list of raw answer strings, return the raw answer whose normalized
-    form appears most often. Returns "" if the list is empty.
-    """
     if not answers:
         return ""
 
@@ -125,13 +131,6 @@ def run_single_agent_generator(
     questions: Sequence[AnyExample],
     cfg: InferenceConfig,
 ) -> List[str]:
-    """
-    Single-agent baseline: use only the Generator-style prompt and model.
-
-    Accepts both Gsm8kExample and SomadhanExample questions. For each question,
-    sample cfg.num_samples generator outputs and return the majority-voted
-    final answer.
-    """
     final_answers: List[str] = []
 
     for ex in questions:
@@ -156,7 +155,6 @@ def run_single_agent_generator(
     return final_answers
 
 
-# Backwards-compatible alias for callers that used the GSM8K-specific name.
 run_single_agent_generator_gsm8k = run_single_agent_generator
 
 
@@ -172,15 +170,6 @@ def run_multi_agent_malt(
     questions: Sequence[AnyExample],
     cfg: InferenceConfig,
 ) -> List[str]:
-    """
-    Multi-agent MALT-style inference.
-
-    Accepts both Gsm8kExample and SomadhanExample questions. For each question:
-      1. Sample a generator solution.
-      2. Feed it to the verifier and sample a critique.
-      3. Feed both into the refiner and sample a refined solution.
-      4. Repeat cfg.num_samples times and majority-vote over refined answers.
-    """
     final_answers: List[str] = []
 
     for ex in questions:
@@ -188,7 +177,7 @@ def run_multi_agent_malt(
         answers: List[str] = []
 
         for _ in range(cfg.num_samples):
-            # Generator
+            set_active_role_adapter(generator_model, ROLE_GENERATOR)
             g_text = _generate_single(
                 model=generator_model,
                 tokenizer=tokenizer,
@@ -199,7 +188,7 @@ def run_multi_agent_malt(
                 top_k=cfg.top_k,
             )
 
-            # Verifier
+            set_active_role_adapter(verifier_model, ROLE_VERIFIER)
             v_text = _generate_single(
                 model=verifier_model,
                 tokenizer=tokenizer,
@@ -210,7 +199,7 @@ def run_multi_agent_malt(
                 top_k=cfg.top_k,
             )
 
-            # Refiner
+            set_active_role_adapter(refiner_model, ROLE_REFINER)
             r_text = _generate_single(
                 model=refiner_model,
                 tokenizer=tokenizer,
@@ -228,5 +217,4 @@ def run_multi_agent_malt(
     return final_answers
 
 
-# Backwards-compatible alias for callers that used the GSM8K-specific name.
 run_multi_agent_malt_gsm8k = run_multi_agent_malt

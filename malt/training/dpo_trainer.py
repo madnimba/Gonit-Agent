@@ -24,10 +24,12 @@ from malt.models import (
     ROLE_REFINER,
 )
 from malt.models.prompts import (
+    format_chat_prompt,
     build_verifier_prompt,
     build_refiner_prompt,
 )
 from malt.search.value_iteration import (
+    TaskName,
     ValueIterationConfig,
     apply_value_iteration_to_trajectories,
 )
@@ -36,18 +38,14 @@ from malt.utils.io import read_jsonl
 
 @dataclass
 class DpoTrainingConfig:
-    """
-    Configuration for DPO training of Verifier / Refiner adapters.
-    """
-
     output_dir: Path
     beta: float = 0.2
 
     num_train_epochs: int = 1
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    learning_rate: float = 5e-5
-    max_seq_length: int = 1024
+    learning_rate: float = 5e-6
+    max_seq_length: int = 2048
     max_train_samples: int | None = None
 
     logging_steps: int = 50
@@ -59,20 +57,6 @@ class DpoTrainingConfig:
 
 
 class DpoTextPairDataset(Dataset):
-    """
-    Dataset for DPO training.
-
-    Each item is a dict with:
-        {
-          "prompt": str,
-          "chosen": str,
-          "rejected": str,
-        }
-
-    DPOTrainer (from `trl`) handles tokenization internally using these
-    fields, so we do not tokenize here.
-    """
-
     def __init__(self, samples: Sequence[Tuple[str, str, str]]) -> None:
         self.samples = list(samples)
 
@@ -91,14 +75,12 @@ class DpoTextPairDataset(Dataset):
 def _build_verifier_dpo_text_triples_from_trajectories(
     valued_trajectories_path: Path,
     max_train_samples: int | None,
+    task: TaskName = "somadhan",
 ) -> List[Tuple[str, str, str]]:
-    """
-    Build (prompt, chosen, rejected) triples for Verifier DPO.
-    """
     trajs = read_jsonl(valued_trajectories_path)
     valued = apply_value_iteration_to_trajectories(
         trajectories=trajs,
-        cfg=ValueIterationConfig(task="gsm8k"),
+        cfg=ValueIterationConfig(task=task),
     )
     samples: List[VerifierDpoSample] = build_verifier_dpo_samples(valued)
 
@@ -115,14 +97,12 @@ def _build_verifier_dpo_text_triples_from_trajectories(
 def _build_refiner_dpo_text_triples_from_trajectories(
     valued_trajectories_path: Path,
     max_train_samples: int | None,
+    task: TaskName = "somadhan",
 ) -> List[Tuple[str, str, str]]:
-    """
-    Build (prompt, chosen, rejected) triples for Refiner DPO.
-    """
     trajs = read_jsonl(valued_trajectories_path)
     valued = apply_value_iteration_to_trajectories(
         trajectories=trajs,
-        cfg=ValueIterationConfig(task="gsm8k"),
+        cfg=ValueIterationConfig(task=task),
     )
     samples: List[RefinerDpoSample] = build_refiner_dpo_samples(valued)
 
@@ -159,10 +139,8 @@ def _build_dpo_trainer(
         bf16=cfg.bf16,
         fp16=cfg.fp16,
         report_to=[],
-        max_length=cfg.max_seq_length,  # TRL field
+        max_length=cfg.max_seq_length,
         beta=cfg.beta,
-
-        # These exist in your DPOConfig signature; set explicitly for memory
         gradient_checkpointing=True,
         use_cache=False,
     )
@@ -179,13 +157,13 @@ def train_verifier_dpo(
     valued_trajectories_path: Path,
     cfg: DpoTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
+    task: TaskName = "somadhan",
 ):
     """
     Train the Verifier adapter with DPO on valued trajectories.
 
-    Assumes the Verifier adapter has already been SFT-trained; both `model`
-    and `ref_model` are initialized identically from that checkpoint and
-    the DPOTrainer updates only `model`.
+    Loads the SFT-trained verifier checkpoint as both the policy model
+    and the frozen reference model.
     """
     model_cfg = model_cfg or MaltModelConfig()
 
@@ -207,10 +185,11 @@ def train_verifier_dpo(
     triples = _build_verifier_dpo_text_triples_from_trajectories(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
+        task=task,
     )
     dataset = HFDataset.from_dict(
         {
-            "prompt": [p for p, _, _ in triples],
+            "prompt": [format_chat_prompt(tokenizer, p) for p, _, _ in triples],
             "chosen": [c for _, c, _ in triples],
             "rejected": [r for _, _, r in triples],
         }
@@ -227,40 +206,44 @@ def train_verifier_dpo(
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(cfg.output_dir))
-
 
 def train_refiner_dpo(
     valued_trajectories_path: Path,
     cfg: DpoTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
+    task: TaskName = "somadhan",
 ):
     """
     Train the Refiner adapter with DPO on valued trajectories.
+
+    Loads the SFT-trained *refiner* checkpoint as both the policy model
+    and the frozen reference model.
     """
     model_cfg = model_cfg or MaltModelConfig()
 
     model, tokenizer = load_malt_llama_with_trained_adapters(
         model_cfg,
-        verifier_checkpoint=Path("checkpoints/refiner_sft"),
+        refiner_checkpoint=Path("checkpoints/refiner_sft"),
     )
-    set_active_role_adapter(model, ROLE_VERIFIER)
+    set_active_role_adapter(model, ROLE_REFINER)
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
 
     ref_model, _ = load_malt_llama_with_trained_adapters(
         model_cfg,
-        verifier_checkpoint=Path("checkpoints/refiner_sft"),
+        refiner_checkpoint=Path("checkpoints/refiner_sft"),
     )
-    set_active_role_adapter(ref_model, ROLE_VERIFIER)
+    set_active_role_adapter(ref_model, ROLE_REFINER)
     ref_model.config.use_cache = False
 
     triples = _build_refiner_dpo_text_triples_from_trajectories(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
+        task=task,
     )
     dataset = HFDataset.from_dict(
         {
-            "prompt": [p for p, _, _ in triples],
+            "prompt": [format_chat_prompt(tokenizer, p) for p, _, _ in triples],
             "chosen": [c for _, c, _ in triples],
             "rejected": [r for _, _, r in triples],
         }
@@ -277,4 +260,3 @@ def train_refiner_dpo(
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(cfg.output_dir))
-

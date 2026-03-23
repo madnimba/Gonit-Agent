@@ -27,11 +27,13 @@ from malt.models import (
     ROLE_REFINER,
 )
 from malt.models.prompts import (
+    format_chat_conversation,
     build_generator_prompt,
     build_verifier_prompt,
     build_refiner_prompt,
 )
 from malt.search.value_iteration import (
+    TaskName,
     ValueIterationConfig,
     apply_value_iteration_to_trajectories,
 )
@@ -40,34 +42,33 @@ from malt.utils.io import read_jsonl
 
 @dataclass
 class SftTrainingConfig:
-    """
-    Generic configuration for supervised fine-tuning with LoRA.
-    """
-
     output_dir: Path
 
-    num_train_epochs: int = 1
+    num_train_epochs: int = 3
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    learning_rate: float = 1e-4
-    max_seq_length: int = 1024
+    learning_rate: float = 1e-5
+    max_seq_length: int = 2048
     max_train_samples: int | None = None
 
     logging_steps: int = 50
     save_steps: int = 500
     save_total_limit: int = 2
 
-    bf16: bool = False
-    fp16: bool = True
+    bf16: bool = True
+    fp16: bool = False
 
 
 class SupervisedTextDataset(Dataset):
     """
-    Simple supervised dataset wrapping (prompt, response) text pairs.
+    Supervised dataset wrapping (prompt_text, full_text) pairs where both
+    have already been formatted through the chat template.
 
-    The model is trained to generate `response` given `prompt`. We feed the
-    concatenated sequence `[prompt][response]` and mask the prompt tokens in
-    the loss with -100.
+    *prompt_text* is everything up to the assistant generation marker;
+    *full_text* is the complete conversation including the assistant
+    response.  We tokenize *full_text* and mask the *prompt_text* portion
+    (by token count) with -100 in the labels so the loss is computed only
+    on the response.
     """
 
     def __init__(
@@ -80,11 +81,10 @@ class SupervisedTextDataset(Dataset):
         self.pairs = list(pairs)
         self.max_seq_length = max_seq_length
 
-        # Pre-tokenize prompts to avoid recomputing prompt lengths repeatedly.
         self._prompt_token_lens: List[int] = []
-        for prompt, _ in self.pairs:
+        for prompt_text, _ in self.pairs:
             enc = self.tokenizer(
-                prompt,
+                prompt_text,
                 add_special_tokens=False,
                 truncation=True,
                 max_length=self.max_seq_length,
@@ -95,10 +95,9 @@ class SupervisedTextDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, idx: int):
-        prompt, response = self.pairs[idx]
+        _, full_text = self.pairs[idx]
         prompt_len = self._prompt_token_lens[idx]
 
-        full_text = prompt + "\n\n" + response
         enc = self.tokenizer(
             full_text,
             truncation=True,
@@ -109,7 +108,6 @@ class SupervisedTextDataset(Dataset):
         attention_mask = enc["attention_mask"][0]
 
         labels = input_ids.clone()
-        # Mask out prompt tokens from the loss.
         labels[:prompt_len] = -100
 
         return {
@@ -122,21 +120,13 @@ class SupervisedTextDataset(Dataset):
 def _build_generator_text_pairs_from_trajectories(
     valued_trajectories_path: Path,
     max_train_samples: int | None,
+    task: TaskName = "somadhan",
 ) -> List[Tuple[str, str]]:
-    """
-    Load valued trajectories and build (prompt, response) text pairs for
-    generator SFT.
-
-    This assumes that value iteration has already been applied and that
-    generator nodes carry a `label` field.
-    """
     trajs = read_jsonl(valued_trajectories_path)
 
-    # In case the input file is unvalued, we can still apply value iteration
-    # with default settings here.
     valued = apply_value_iteration_to_trajectories(
         trajectories=trajs,
-        cfg=ValueIterationConfig(task="gsm8k"),
+        cfg=ValueIterationConfig(task=task),
     )
 
     samples: List[GeneratorSftSample] = build_generator_sft_samples(valued)
@@ -156,16 +146,13 @@ def _build_generator_text_pairs_from_trajectories(
 def _build_verifier_and_refiner_text_pairs_from_trajectories(
     valued_trajectories_path: Path,
     max_train_samples: int | None,
+    task: TaskName = "somadhan",
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
-    """
-    Load valued trajectories and build (prompt, response) text pairs for
-    verifier and refiner SFT.
-    """
     trajs = read_jsonl(valued_trajectories_path)
 
     valued = apply_value_iteration_to_trajectories(
         trajectories=trajs,
-        cfg=ValueIterationConfig(task="gsm8k"),
+        cfg=ValueIterationConfig(task=task),
     )
 
     v_samples, r_samples = build_verifier_and_refiner_sft_samples(valued)
@@ -193,22 +180,59 @@ def _build_verifier_and_refiner_text_pairs_from_trajectories(
     return v_pairs, r_pairs
 
 
+def _run_sft(
+    model,
+    tokenizer,
+    text_pairs: List[Tuple[str, str]],
+    cfg: SftTrainingConfig,
+) -> None:
+    # Format (raw_prompt, response) → (prompt_text, full_text) via chat
+    # template so training inputs match inference-time formatting.
+    formatted_pairs: List[Tuple[str, str]] = []
+    for raw_prompt, response in text_pairs:
+        prompt_text, full_text = format_chat_conversation(
+            tokenizer, raw_prompt, response,
+        )
+        formatted_pairs.append((prompt_text, full_text))
+
+    dataset = SupervisedTextDataset(
+        tokenizer=tokenizer,
+        pairs=formatted_pairs,
+        max_seq_length=cfg.max_seq_length,
+    )
+
+    training_args = TrainingArguments(
+        output_dir=str(cfg.output_dir),
+        num_train_epochs=cfg.num_train_epochs,
+        per_device_train_batch_size=cfg.per_device_train_batch_size,
+        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
+        learning_rate=cfg.learning_rate,
+        logging_steps=cfg.logging_steps,
+        save_steps=cfg.save_steps,
+        save_total_limit=cfg.save_total_limit,
+        bf16=cfg.bf16,
+        fp16=cfg.fp16,
+        report_to=[],
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+    )
+
+    trainer.train()
+
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(cfg.output_dir))
+
+
 def train_generator_sft(
     valued_trajectories_path: Path,
     cfg: SftTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
+    task: TaskName = "somadhan",
 ):
-    """
-    High-level entry point: train the Generator LoRA adapter using GSM8K
-    trajectories.
-
-    Workflow:
-      1. Load (and, if needed, value) trajectories from `valued_trajectories_path`.
-      2. Build positive generator SFT samples.
-      3. Load the shared base model + adapters.
-      4. Activate the generator adapter and run supervised fine-tuning.
-      5. Save the resulting adapter weights in `cfg.output_dir`.
-    """
     model_cfg = model_cfg or MaltModelConfig()
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
     set_active_role_adapter(model, ROLE_GENERATOR)
@@ -216,49 +240,17 @@ def train_generator_sft(
     text_pairs = _build_generator_text_pairs_from_trajectories(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
+        task=task,
     )
-
-    dataset = SupervisedTextDataset(
-        tokenizer=tokenizer,
-        pairs=text_pairs,
-        max_seq_length=cfg.max_seq_length,
-    )
-
-    training_args = TrainingArguments(
-        output_dir=str(cfg.output_dir),
-        num_train_epochs=cfg.num_train_epochs,
-        per_device_train_batch_size=cfg.per_device_train_batch_size,
-        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-        learning_rate=cfg.learning_rate,
-        logging_steps=cfg.logging_steps,
-        save_steps=cfg.save_steps,
-        save_total_limit=cfg.save_total_limit,
-        bf16=cfg.bf16,
-        fp16=cfg.fp16,
-        report_to=[],
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-    )
-
-    trainer.train()
-
-    # Save the model with updated generator adapter weights.
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(cfg.output_dir))
+    _run_sft(model, tokenizer, text_pairs, cfg)
 
 
 def train_verifier_sft(
     valued_trajectories_path: Path,
     cfg: SftTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
+    task: TaskName = "somadhan",
 ):
-    """
-    Train the Verifier LoRA adapter using GSM8K trajectories.
-    """
     model_cfg = model_cfg or MaltModelConfig()
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
     set_active_role_adapter(model, ROLE_VERIFIER)
@@ -266,48 +258,17 @@ def train_verifier_sft(
     v_pairs, _ = _build_verifier_and_refiner_text_pairs_from_trajectories(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
+        task=task,
     )
-
-    dataset = SupervisedTextDataset(
-        tokenizer=tokenizer,
-        pairs=v_pairs,
-        max_seq_length=cfg.max_seq_length,
-    )
-
-    training_args = TrainingArguments(
-        output_dir=str(cfg.output_dir),
-        num_train_epochs=cfg.num_train_epochs,
-        per_device_train_batch_size=cfg.per_device_train_batch_size,
-        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-        learning_rate=cfg.learning_rate,
-        logging_steps=cfg.logging_steps,
-        save_steps=cfg.save_steps,
-        save_total_limit=cfg.save_total_limit,
-        bf16=cfg.bf16,
-        fp16=cfg.fp16,
-        report_to=[],
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-    )
-
-    trainer.train()
-
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(cfg.output_dir))
+    _run_sft(model, tokenizer, v_pairs, cfg)
 
 
 def train_refiner_sft(
     valued_trajectories_path: Path,
     cfg: SftTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
+    task: TaskName = "somadhan",
 ):
-    """
-    Train the Refiner LoRA adapter using GSM8K trajectories.
-    """
     model_cfg = model_cfg or MaltModelConfig()
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
     set_active_role_adapter(model, ROLE_REFINER)
@@ -315,37 +276,6 @@ def train_refiner_sft(
     _, r_pairs = _build_verifier_and_refiner_text_pairs_from_trajectories(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
+        task=task,
     )
-
-    dataset = SupervisedTextDataset(
-        tokenizer=tokenizer,
-        pairs=r_pairs,
-        max_seq_length=cfg.max_seq_length,
-    )
-
-    training_args = TrainingArguments(
-        output_dir=str(cfg.output_dir),
-        num_train_epochs=cfg.num_train_epochs,
-        per_device_train_batch_size=cfg.per_device_train_batch_size,
-        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-        learning_rate=cfg.learning_rate,
-        logging_steps=cfg.logging_steps,
-        save_steps=cfg.save_steps,
-        save_total_limit=cfg.save_total_limit,
-        bf16=cfg.bf16,
-        fp16=cfg.fp16,
-        report_to=[],
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-    )
-
-    trainer.train()
-
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(cfg.output_dir))
-
-
+    _run_sft(model, tokenizer, r_pairs, cfg)

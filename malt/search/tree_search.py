@@ -21,6 +21,7 @@ from malt.models import (
     ROLE_REFINER,
 )
 from malt.models.prompts import (
+    format_chat_prompt,
     build_generator_prompt,
     build_verifier_prompt,
     build_refiner_prompt,
@@ -48,9 +49,9 @@ class TreeSearchConfig:
 
     branching_factor: int = 3
 
-    max_new_tokens_generator: int = 256
-    max_new_tokens_verifier: int = 256
-    max_new_tokens_refiner: int = 256
+    max_new_tokens_generator: int = 1024
+    max_new_tokens_verifier: int = 1024
+    max_new_tokens_refiner: int = 1024
 
     temperature_generator: float = 0.7
     temperature_verifier: float = 0.5
@@ -59,16 +60,10 @@ class TreeSearchConfig:
     top_p: float = 0.95
     top_k: int = 50
 
-    # Maximum sequences to send to model.generate() in one call.
-    # Lower this if you hit OOM; raise it (up to n**3) to maximise GPU util.
     max_batch_size: int = 32
 
-    # Whether to torch.compile the model after loading.
-    # NOTE: set False on shared GPUs — compile spawns Triton worker processes
-    # that each hold ~3 GiB of VRAM independently of the parent process.
     use_torch_compile: bool = False
 
-    # Output path for JSONL trajectories (each line is a single question's tree).
     output_path: Path = Path("data/malt_trajectories.jsonl")
 
 
@@ -97,10 +92,6 @@ class GeneratorNode:
 # Core batched inference helper
 # ---------------------------------------------------------------------------
 
-# Module-level variable: the last successful batch size. Persists across
-# _sample_texts calls within a run so OOM probing only happens once — on the
-# first question — rather than repeating the 32→16→8 retry sequence for all
-# 8792 questions.
 _current_batch_size: Optional[int] = None
 
 
@@ -118,22 +109,13 @@ def _sample_texts(
     Sample one completion per prompt, batching up to *max_batch_size* prompts
     per forward pass.
 
-    Speedups vs. naive implementation:
-    - torch.inference_mode(): disables autograd tracking entirely, lower
-      overhead than no_grad for pure inference.
-    - use_cache=True: explicit KV cache so each autoregressive step only
-      processes the new token rather than the full prefix.
-    - Persistent batch size: _current_batch_size remembers the last successful
-      size across calls so OOM retries only happen once per run, not once per
-      question.
-
-    On CUDA OOM, halves the batch size and retries down to a minimum of 1.
+    *prompts* must already be formatted through the chat template (via
+    ``format_chat_prompt``).
     """
     global _current_batch_size
     model.eval()
     all_outputs: List[str] = []
 
-    # Start from the last known-good size, capped at the caller's max.
     if _current_batch_size is None:
         _current_batch_size = max_batch_size
     current_batch_size = min(_current_batch_size, max_batch_size)
@@ -163,10 +145,6 @@ def _sample_texts(
                     use_cache=True,
                 )
             except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
-                # Catch both torch OOM and lower-level CUDA errors such as
-                # CUBLAS_STATUS_ALLOC_FAILED, which surfaces as RuntimeError
-                # rather than OutOfMemoryError when cuBLAS cannot allocate its
-                # internal workspace due to insufficient VRAM.
                 is_oom = isinstance(exc, torch.cuda.OutOfMemoryError) or (
                     isinstance(exc, RuntimeError)
                     and any(
@@ -187,9 +165,8 @@ def _sample_texts(
                     current_batch_size, type(exc).__name__, new_size,
                 )
                 current_batch_size = new_size
-                continue  # retry same batch_start with smaller batch
+                continue
 
-            # Remember the size that worked so future calls start here.
             _current_batch_size = current_batch_size
 
             input_len = inputs["input_ids"].shape[1]
@@ -203,7 +180,7 @@ def _sample_texts(
 
 
 # ---------------------------------------------------------------------------
-# Tree search — role stages are each executed in a single batched pass
+# Tree search
 # ---------------------------------------------------------------------------
 
 def run_tree_search_for_questions(
@@ -215,20 +192,19 @@ def run_tree_search_for_questions(
     """
     Run G→V→R tree search for a list of questions.
 
-    Accepts both Gsm8kExample and SomadhanExample. Yields (trajectory, elapsed)
-    tuples so the caller can track per-question timing for ETA estimates.
+    Prompts are formatted through the model's chat template before
+    generation.  Yields (trajectory_dict, elapsed_seconds) tuples.
     """
     n = cfg.branching_factor
 
     for ex in questions:
         step_start = time.time()
 
-        # ------------------------------------------------------------------
-        # Stage 1: Generator — n prompts, 1 adapter swap, 1 batched call
-        # ------------------------------------------------------------------
+        # Stage 1: Generator
         set_active_role_adapter(model, ROLE_GENERATOR)
 
-        gen_prompts = [build_generator_prompt(ex.question) for _ in range(n)]
+        g_user = build_generator_prompt(ex.question)
+        gen_prompts = [format_chat_prompt(tokenizer, g_user) for _ in range(n)]
         gen_texts: List[str] = _sample_texts(
             model=model,
             tokenizer=tokenizer,
@@ -240,15 +216,14 @@ def run_tree_search_for_questions(
             max_batch_size=cfg.max_batch_size,
         )
 
-        # ------------------------------------------------------------------
-        # Stage 2: Verifier — n² prompts, 1 adapter swap, 1 batched call
-        # ------------------------------------------------------------------
+        # Stage 2: Verifier
         set_active_role_adapter(model, ROLE_VERIFIER)
 
         v_prompts: List[str] = []
         for g_text in gen_texts:
+            v_user = build_verifier_prompt(ex.question, g_text)
             for _ in range(n):
-                v_prompts.append(build_verifier_prompt(ex.question, g_text))
+                v_prompts.append(format_chat_prompt(tokenizer, v_user))
 
         v_texts_flat: List[str] = _sample_texts(
             model=model,
@@ -264,18 +239,15 @@ def run_tree_search_for_questions(
             v_texts_flat[i * n : (i + 1) * n] for i in range(n)
         ]
 
-        # ------------------------------------------------------------------
-        # Stage 3: Refiner — n³ prompts, 1 adapter swap, 1 batched call
-        # ------------------------------------------------------------------
+        # Stage 3: Refiner
         set_active_role_adapter(model, ROLE_REFINER)
 
         r_prompts: List[str] = []
         for g_idx, g_text in enumerate(gen_texts):
             for v_text in v_texts[g_idx]:
+                r_user = build_refiner_prompt(ex.question, g_text, v_text)
                 for _ in range(n):
-                    r_prompts.append(
-                        build_refiner_prompt(ex.question, g_text, v_text)
-                    )
+                    r_prompts.append(format_chat_prompt(tokenizer, r_user))
 
         r_texts_flat: List[str] = _sample_texts(
             model=model,
@@ -288,9 +260,7 @@ def run_tree_search_for_questions(
             max_batch_size=cfg.max_batch_size,
         )
 
-        # ------------------------------------------------------------------
-        # Reassemble the tree from the flat output lists
-        # ------------------------------------------------------------------
+        # Reassemble tree
         generator_nodes: List[GeneratorNode] = []
         r_idx = 0
 
@@ -336,10 +306,6 @@ def run_tree_search_for_questions(
 # ---------------------------------------------------------------------------
 
 def _get_last_processed_id(path: Path) -> Optional[str]:
-    """
-    Return the id of the last successfully written trajectory, or None.
-    Reads only the final non-empty line so it stays O(1) for large files.
-    """
     if not path.exists():
         return None
 
@@ -368,10 +334,6 @@ def _run_tree_search(
     cfg: TreeSearchConfig,
     model_cfg: Optional[MaltModelConfig] = None,
 ) -> Path:
-    """
-    Shared implementation: apply resumption, load model, optionally compile,
-    run tree search, and write JSONL output with ETA logging.
-    """
     cfg.output_path.parent.mkdir(parents=True, exist_ok=True)
     log.info("Output path: %s", cfg.output_path)
 
@@ -452,11 +414,7 @@ def run_tree_search_for_gsm8k_split(
     cfg: TreeSearchConfig,
     model_cfg: Optional[MaltModelConfig] = None,
 ) -> Path:
-    """
-    Load a GSM8K split and run tree search over it, writing one JSON line per
-    question to cfg.output_path.
-    """
-    from malt.data import load_gsm8k_split  # imported lazily to avoid cycles
+    from malt.data import load_gsm8k_split
 
     examples = load_gsm8k_split(split)
     log.info("Loaded %d examples from GSM8K '%s' split", len(examples), split)
@@ -467,11 +425,16 @@ def run_tree_search_for_somadhan(
     csv_path: str | Path,
     cfg: TreeSearchConfig,
     model_cfg: Optional[MaltModelConfig] = None,
+    id_start: int = 1,
 ) -> Path:
     """
-    Load the full Somadhan dataset from a CSV file and run tree search over it,
-    writing one JSON line per question to cfg.output_path.
+    Load Somadhan from CSV and run tree search.
+
+    *id_start* controls the first ID assigned to rows in the CSV.
+    Use different values for different chunks so IDs are globally unique
+    after merging (e.g. 1 for chunk 1, 1001 for chunk 2).
     """
-    examples = load_Somadhan_split(csv_path)
-    log.info("Loaded %d examples from Somadhan CSV '%s'", len(examples), csv_path)
+    examples = load_Somadhan_split(csv_path, id_start=id_start)
+    log.info("Loaded %d examples from Somadhan CSV '%s' (id_start=%d)",
+             len(examples), csv_path, id_start)
     return _run_tree_search(examples, cfg, model_cfg)

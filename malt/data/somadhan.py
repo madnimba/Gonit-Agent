@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import List
 
 
+_BENGALI_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+
+def _bengali_to_arabic(text: str) -> str:
+    """Convert Bengali digits (০-৯) to Arabic digits (0-9)."""
+    return text.translate(_BENGALI_DIGITS)
+
+
 @dataclass
 class SomadhanExample:
     """
@@ -27,33 +35,46 @@ class SomadhanExample:
 
 def extract_Somadhan_answer(answer_text: str) -> str:
     """
-    Extract the final answer from a Somadhan solution string.
+    Extract the final answer from a Somadhan solution or model output.
 
-    Somadhan answers are usually of the form:
-        "... reasoning ... #### 42"
+    Handles multiple formats in priority order:
+      1. <answer>...</answer> tags  (GanitLLM model output)
+      2. #### marker               (SOMADHAN CSV ground truth)
+      3. Last numeric token         (fallback)
 
-    We first look for the '####' marker; if absent, we fall back to the
-    last numeric token in the string.
+    Any <think>...</think> blocks are stripped before extraction.
+    Bengali digits are converted to Arabic in the result.
     """
-    if "####" in answer_text:
-        final = answer_text.split("####", maxsplit=1)[-1]
-        return final.strip()
+    # Strip thinking blocks that Qwen3 models sometimes produce.
+    text = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.DOTALL)
 
-    numeric_matches = re.findall(r"-?\d+(?:\.\d+)?", answer_text)
+    # 1) <answer>...</answer> tags
+    m = re.search(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL)
+    if m:
+        return _bengali_to_arabic(m.group(1).strip())
+
+    # 2) #### marker (GSM8K / SOMADHAN ground-truth style)
+    if "####" in text:
+        final = text.split("####", maxsplit=1)[-1]
+        return _bengali_to_arabic(final.strip())
+
+    # 3) Last numeric token (Bengali or Arabic)
+    numeric_matches = re.findall(r"-?[\d০-৯]+(?:\.[\d০-৯]+)?", text)
     if numeric_matches:
-        return numeric_matches[-1].strip()
+        return _bengali_to_arabic(numeric_matches[-1].strip())
 
-    return answer_text.strip()
+    return _bengali_to_arabic(text.strip())
 
 
 def normalize_Somadhan_answer(text: str) -> str:
     """
     Normalize a Somadhan answer string for comparison.
 
+    Bengali digits are converted to Arabic first, then:
     - Numeric strings are normalized to compact form (no trailing .0).
     - Non-numeric strings are lowercased and stripped.
     """
-    text = text.strip()
+    text = _bengali_to_arabic(text.strip())
     cleaned = text.replace(",", "")
     try:
         value = float(cleaned)
@@ -75,7 +96,10 @@ def Somadhan_exact_match(predicted: str, target: str) -> bool:
     return pred_final == target_final
 
 
-def load_Somadhan_split(csv_path: str | Path) -> List[SomadhanExample]:
+def load_Somadhan_split(
+    csv_path: str | Path,
+    id_start: int = 1,
+) -> List[SomadhanExample]:
     """
     Load the full Somadhan dataset from a CSV file.
 
@@ -83,10 +107,11 @@ def load_Somadhan_split(csv_path: str | Path) -> List[SomadhanExample]:
         - question
         - answer
 
-    An optional 'id' column is used if present; otherwise the row index is
-    used as the id.
-
-    All rows are returned — no train/test split is applied.
+    An optional 'id' column is used if present; otherwise IDs are assigned
+    sequentially starting from *id_start*.  For chunked trajectory
+    generation across multiple machines, use different id_start values
+    (e.g. 1 for chunk 1, 1001 for chunk 2) so that IDs are globally unique
+    after merging the output JSONL files.
     """
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -113,7 +138,7 @@ def load_Somadhan_split(csv_path: str | Path) -> List[SomadhanExample]:
             answer_target = extract_Somadhan_answer(answer_raw)
             examples.append(
                 SomadhanExample(
-                    id=str(row.get("id", idx)),
+                    id=str(row.get("id", id_start + idx)),
                     question=question,
                     answer_raw=answer_raw,
                     answer_target=answer_target,

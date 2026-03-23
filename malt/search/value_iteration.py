@@ -27,7 +27,7 @@ class ValueIterationConfig:
     Configuration for value-iteration-based credit assignment.
     """
 
-    task: TaskName = "gsm8k"
+    task: TaskName = "somadhan"
     threshold: float = 0.5
 
 
