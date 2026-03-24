@@ -48,9 +48,9 @@ class TreeSearchConfig:
 
     branching_factor: int = 3
 
-    max_new_tokens_generator: int = 256
-    max_new_tokens_verifier: int = 256
-    max_new_tokens_refiner: int = 256
+    max_new_tokens_generator: int = 512
+    max_new_tokens_verifier: int = 512
+    max_new_tokens_refiner: int = 512
 
     temperature_generator: float = 0.7
     temperature_verifier: float = 0.5

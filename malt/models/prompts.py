@@ -22,10 +22,11 @@ def build_generator_prompt(question: str) -> str:
     return dedent(
         f"""
         You are an expert math problem solver.
-        Solve the following problem step by step, explaining your reasoning
-        clearly. At the end, output a single line of the form:
+        Solve the following Bengali math problem step by step, explaining your reasoning
+        clearly. At the end, output a single line of the form. :
 
         Final Answer: <answer>
+        Respond in Bengali
 
         Problem:
         {question}
@@ -43,6 +44,7 @@ def build_verifier_prompt(question: str, generator_output: str) -> str:
 
         Verdict: correct/incorrect
         Final Answer: <answer>
+    Respond in Bengali.
     """
     return dedent(
         f"""
@@ -59,6 +61,7 @@ def build_verifier_prompt(question: str, generator_output: str) -> str:
         Always end your response with:
         Verdict: correct/incorrect
         Final Answer: <answer>
+        Respond in Bengali.
 
         Problem:
         {question}
@@ -101,6 +104,7 @@ def build_refiner_prompt(
 
         Always end your response with:
         Final Answer: <answer>
+        Respond in Bengali
 
         Problem:
         {question}
