@@ -82,19 +82,29 @@ def format_chat_conversation(
 # Callers must pass through format_chat_prompt() before tokenization.
 # ---------------------------------------------------------------------------
 
+# The preamble is GanitLLM's exact training prompt (Appendix E of
+# ganitLLM.pdf).  All three roles reuse it so the model stays
+# in-distribution and always produces step-by-step Bengali reasoning.
+_PREAMBLE = (
+    "A conversation takes place between the user and the assistant. "
+    "The user asks a question, and the assistant solves the problem. "
+    "Please reason step by step in Bengali, and put your final answer "
+    "in the <answer> </answer> tags."
+)
+
+
 def build_generator_prompt(question: str) -> str:
     """
     Prompt for the Generator (G).
 
-    Matches GanitLLM's training prompt exactly (Appendix E of ganitLLM.pdf)
-    so the model stays in-distribution.
+    Uses GanitLLM's preamble with a Bengali instruction reinforcing
+    that all steps must be shown and the answer must be in <answer> tags.
     """
     return (
-        "A conversation takes place between the user and the assistant. "
-        "The user asks a question, and the assistant solves the problem. "
-        "Please reason step by step in Bengali, and put your final answer "
-        "in the <answer> </answer> tags.\n\n"
-        f"Question: {question}"
+        f"{_PREAMBLE}\n\n"
+        f"Question: {question}\n\n"
+        f"প্রতিটি ধাপ বিস্তারিতভাবে বাংলায় দেখান এবং চূড়ান্ত উত্তর অবশ্যই "
+        f"<answer> </answer> ট্যাগের মধ্যে দিন।"
     )
 
 
@@ -102,29 +112,17 @@ def build_verifier_prompt(question: str, generator_output: str) -> str:
     """
     Prompt for the Verifier (V).
 
-    The verifier re-checks the generator's reasoning and answer, identifies
-    any errors, and provides its own answer inside <answer></answer> tags.
+    Same GanitLLM preamble, but the "question" now includes the original
+    problem and a proposed solution to verify.  The model is asked to
+    re-solve independently and point out any errors.
     """
-    return dedent(
-        f"""\
-You are an expert solution checker for Bengali math problems.
-
-Your task is to carefully read the problem and the proposed solution,
-then verify whether the reasoning and final answer are correct.
-
-- If the solution is correct, briefly explain why and keep the same
-  final answer.
-- If the solution is incorrect, explain the error, recompute the
-  correct solution, and provide the correct final answer.
-
-Reason step by step in Bengali. Always put your final answer in
-the <answer> </answer> tags.
-
-Problem:
-{question}
-
-Proposed solution:
-{generator_output}"""
+    return (
+        f"{_PREAMBLE}\n\n"
+        f"Question: নিচের সমস্যাটি এবং প্রস্তাবিত সমাধানটি মনোযোগ দিয়ে পড়ুন। "
+        f"সমাধানের প্রতিটি ধাপ যাচাই করুন। যদি কোনো ভুল থাকে, সঠিক সমাধান দিন। "
+        f"যদি সমাধান সঠিক হয়, কেন সঠিক তা ব্যাখ্যা করুন।\n\n"
+        f"সমস্যা:\n{question}\n\n"
+        f"প্রস্তাবিত সমাধান:\n{generator_output}"
     )
 
 
@@ -136,37 +134,18 @@ def build_refiner_prompt(
     """
     Prompt for the Refinement model (R).
 
-    The refiner sees both the initial solution and the verification
-    critique, and must produce a corrected final solution with the answer
-    inside <answer></answer> tags.
+    Same GanitLLM preamble, but the "question" now includes the original
+    problem, initial solution, and a verification critique.  The model
+    must produce a corrected final solution.
     """
-    return dedent(
-        f"""\
-You are an expert problem solver that refines math solutions based on
-feedback.
-
-You are given:
-- A Bengali math word problem.
-- An initial solution.
-- A verification / critique of that solution.
-
-Your task:
-- Use all of this information to produce a clear, corrected, and
-  concise final solution.
-- Fix any mistakes in the original solution.
-- Make sure the final answer is explicitly stated.
-
-Reason step by step in Bengali. Always put your final answer in
-the <answer> </answer> tags.
-
-Problem:
-{question}
-
-Initial solution:
-{generator_output}
-
-Verification / critique:
-{verifier_output}"""
+    return (
+        f"{_PREAMBLE}\n\n"
+        f"Question: নিচের সমস্যা, প্রাথমিক সমাধান এবং যাচাইকরণ মনোযোগ দিয়ে পড়ুন। "
+        f"সব তথ্য ব্যবহার করে একটি সঠিক ও সংক্ষিপ্ত চূড়ান্ত সমাধান তৈরি করুন। "
+        f"প্রতিটি ধাপ স্পষ্টভাবে দেখান।\n\n"
+        f"সমস্যা:\n{question}\n\n"
+        f"প্রাথমিক সমাধান:\n{generator_output}\n\n"
+        f"যাচাইকরণ:\n{verifier_output}"
     )
 
 

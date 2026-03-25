@@ -53,7 +53,7 @@ class TreeSearchConfig:
     max_new_tokens_verifier: int = 1024
     max_new_tokens_refiner: int = 1024
 
-    temperature_generator: float = 0.7
+    temperature_generator: float = 0.5
     temperature_verifier: float = 0.5
     temperature_refiner: float = 0.5
 
