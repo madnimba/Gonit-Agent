@@ -60,7 +60,7 @@ class TreeSearchConfig:
     top_p: float = 0.95
     top_k: int = 50
 
-    max_batch_size: int = 32
+    max_batch_size: int = 64
 
     use_torch_compile: bool = False
 

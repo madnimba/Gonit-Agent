@@ -45,8 +45,8 @@ class SftTrainingConfig:
     output_dir: Path
 
     num_train_epochs: int = 3
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    per_device_train_batch_size: int = 4
+    gradient_accumulation_steps: int = 2
     learning_rate: float = 1e-5
     max_seq_length: int = 2048
     max_train_samples: int | None = None

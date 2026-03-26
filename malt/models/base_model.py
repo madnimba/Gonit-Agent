@@ -27,8 +27,8 @@ ROLE_GENERATOR: Literal["generator"] = "generator"
 ROLE_VERIFIER: Literal["verifier"] = "verifier"
 ROLE_REFINER: Literal["refiner"] = "refiner"
 
-# GanitLLM-4B in 4-bit + three LoRA adapters needs roughly this much VRAM.
-_MIN_FREE_VRAM_GIB = 4.0
+# GanitLLM-4B in bf16 + three LoRA adapters needs roughly this much VRAM.
+_MIN_FREE_VRAM_GIB = 10.0
 
 
 @dataclass
@@ -37,14 +37,15 @@ class MaltModelConfig:
     Configuration for loading the base model and attaching LoRA adapters.
 
     Default model is GanitLLM-4B (Qwen3-4B fine-tuned for Bengali math).
-    4-bit quantization is optional — the 4B model fits in 24 GB at bf16,
-    but 4-bit frees headroom for larger batch sizes during tree search.
+    With 32 GB VRAM (RTX 5090), bf16 is used for maximum quality.
+    Flash Attention 2 is enabled for faster inference and training.
     """
 
     model_name: str = "dipta007/GanitLLM-4B_SFT_CGRPO"
-    load_in_4bit: bool = True
+    load_in_4bit: bool = False
     device_map: str = "auto"
     torch_dtype: torch.dtype = torch.bfloat16
+    attn_implementation: str = "flash_attention_2"
 
     # LoRA configuration — rank 16 matches GanitLLM paper's GRPO LoRA.
     lora_r: int = 16
@@ -233,6 +234,7 @@ def load_malt_llama_with_adapters(
         device_map=cfg.device_map,
         quantization_config=quant_config,
         torch_dtype=cfg.torch_dtype if quant_config is None else None,
+        attn_implementation=cfg.attn_implementation,
     )
     log.info("Base model loaded: %s", cfg.model_name)
 
