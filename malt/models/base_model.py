@@ -45,7 +45,7 @@ class MaltModelConfig:
     load_in_4bit: bool = False
     device_map: str = "auto"
     torch_dtype: torch.dtype = torch.bfloat16
-    attn_implementation: str = "flash_attention_2"
+    attn_implementation: str = "sdpa"
 
     # LoRA configuration — rank 16 matches GanitLLM paper's GRPO LoRA.
     lora_r: int = 16

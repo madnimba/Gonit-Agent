@@ -7,4 +7,3 @@ trl
 sentencepiece
 pyyaml
 tqdm
-flash-attn
