@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+import logging
+import time
+
 from torch.utils.data import Dataset
 from transformers import (
     Trainer,
@@ -38,6 +41,8 @@ from malt.search.value_iteration import (
     apply_value_iteration_to_trajectories,
 )
 from malt.utils.io import read_jsonl
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -135,10 +140,35 @@ def _build_generator_text_pairs_from_trajectories(
         samples = samples[: max_train_samples]
 
     text_pairs: List[Tuple[str, str]] = []
-    for s in samples:
+    times: List[float] = []
+    total = len(samples)
+    log.info("Building %d generator SFT text pairs", total)
+
+    for idx, s in enumerate(samples):
+        step_start = time.time()
         prompt = build_generator_prompt(s.question)
         response = s.generator_output
         text_pairs.append((prompt, response))
+        elapsed = time.time() - step_start
+        times.append(elapsed)
+
+        processed = idx + 1
+        remaining = total - processed
+        if times:
+            avg = sum(times) / len(times)
+            eta_s = avg * remaining
+            h, r = divmod(int(eta_s), 3600)
+            m, s = divmod(r, 60)
+            eta_str = (
+                f"{h}h {m}m {s}s" if h else
+                f"{m}m {s}s" if m else
+                f"{s}s"
+            )
+            log.info(
+                "Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+                processed, total, 100.0 * processed / total,
+                elapsed, avg, eta_str,
+            )
 
     return text_pairs
 
@@ -162,13 +192,43 @@ def _build_verifier_and_refiner_text_pairs_from_trajectories(
         r_samples = r_samples[: max_train_samples]
 
     v_pairs: List[Tuple[str, str]] = []
-    for s in v_samples:
+    times: List[float] = []
+    total_v = len(v_samples)
+    log.info("Building %d verifier SFT text pairs", total_v)
+
+    for idx, s in enumerate(v_samples):
+        step_start = time.time()
         prompt = build_verifier_prompt(s.question, s.generator_output)
         response = s.verifier_output
         v_pairs.append((prompt, response))
+        elapsed = time.time() - step_start
+        times.append(elapsed)
+
+        processed = idx + 1
+        remaining = total_v - processed
+        if times:
+            avg = sum(times) / len(times)
+            eta_s = avg * remaining
+            h, r = divmod(int(eta_s), 3600)
+            m, s = divmod(r, 60)
+            eta_str = (
+                f"{h}h {m}m {s}s" if h else
+                f"{m}m {s}s" if m else
+                f"{s}s"
+            )
+            log.info(
+                "Verifier Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+                processed, total_v, 100.0 * processed / total_v,
+                elapsed, avg, eta_str,
+            )
 
     r_pairs: List[Tuple[str, str]] = []
-    for s in r_samples:
+    times = []
+    total_r = len(r_samples)
+    log.info("Building %d refiner SFT text pairs", total_r)
+
+    for idx, s in enumerate(r_samples):
+        step_start = time.time()
         prompt = build_refiner_prompt(
             s.question,
             s.generator_output,
@@ -176,6 +236,26 @@ def _build_verifier_and_refiner_text_pairs_from_trajectories(
         )
         response = s.refiner_output
         r_pairs.append((prompt, response))
+        elapsed = time.time() - step_start
+        times.append(elapsed)
+
+        processed = idx + 1
+        remaining = total_r - processed
+        if times:
+            avg = sum(times) / len(times)
+            eta_s = avg * remaining
+            h, r = divmod(int(eta_s), 3600)
+            m, s = divmod(r, 60)
+            eta_str = (
+                f"{h}h {m}m {s}s" if h else
+                f"{m}m {s}s" if m else
+                f"{s}s"
+            )
+            log.info(
+                "Refiner Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+                processed, total_r, 100.0 * processed / total_r,
+                elapsed, avg, eta_str,
+            )
 
     return v_pairs, r_pairs
 

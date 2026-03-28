@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+import logging
+import time
+
 from torch.utils.data import Dataset
 from datasets import Dataset as HFDataset
 from transformers import TrainingArguments, PreTrainedTokenizerBase
@@ -34,6 +37,8 @@ from malt.search.value_iteration import (
     apply_value_iteration_to_trajectories,
 )
 from malt.utils.io import read_jsonl
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -88,9 +93,35 @@ def _build_verifier_dpo_text_triples_from_trajectories(
         samples = samples[: max_train_samples]
 
     triples: List[Tuple[str, str, str]] = []
-    for s in samples:
+    times: List[float] = []
+    total = len(samples)
+    log.info("Building %d verifier DPO text triples", total)
+
+    for idx, s in enumerate(samples):
+        step_start = time.time()
         prompt = build_verifier_prompt(s.question, s.generator_output)
         triples.append((prompt.rstrip() + "\n\n", s.chosen.lstrip(), s.rejected.lstrip()))
+        elapsed = time.time() - step_start
+        times.append(elapsed)
+
+        processed = idx + 1
+        remaining = total - processed
+        if times:
+            avg = sum(times) / len(times)
+            eta_s = avg * remaining
+            h, r = divmod(int(eta_s), 3600)
+            m, s = divmod(r, 60)
+            eta_str = (
+                f"{h}h {m}m {s}s" if h else
+                f"{m}m {s}s" if m else
+                f"{s}s"
+            )
+            log.info(
+                "Verifier DPO Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+                processed, total, 100.0 * processed / total,
+                elapsed, avg, eta_str,
+            )
+
     return triples
 
 
@@ -110,13 +141,39 @@ def _build_refiner_dpo_text_triples_from_trajectories(
         samples = samples[: max_train_samples]
 
     triples: List[Tuple[str, str, str]] = []
-    for s in samples:
+    times: List[float] = []
+    total = len(samples)
+    log.info("Building %d refiner DPO text triples", total)
+
+    for idx, s in enumerate(samples):
+        step_start = time.time()
         prompt = build_refiner_prompt(
             s.question,
             s.generator_output,
             s.verifier_output,
         )
         triples.append((prompt + "\n\n", s.chosen.lstrip(), s.rejected.lstrip()))
+        elapsed = time.time() - step_start
+        times.append(elapsed)
+
+        processed = idx + 1
+        remaining = total - processed
+        if times:
+            avg = sum(times) / len(times)
+            eta_s = avg * remaining
+            h, r = divmod(int(eta_s), 3600)
+            m, s = divmod(r, 60)
+            eta_str = (
+                f"{h}h {m}m {s}s" if h else
+                f"{m}m {s}s" if m else
+                f"{s}s"
+            )
+            log.info(
+                "Refiner DPO Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+                processed, total, 100.0 * processed / total,
+                elapsed, avg, eta_str,
+            )
+
     return triples
 
 

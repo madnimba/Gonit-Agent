@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Tuple
 
 import json
+import logging
+import time
 
 from malt.data import (
     extract_gsm8k_answer,
@@ -16,6 +18,8 @@ from malt.data import (
     extract_Somadhan_answer,
     Somadhan_exact_match,
 )
+
+log = logging.getLogger(__name__)
 
 
 TaskName = Literal["gsm8k", "math", "somadhan"]
@@ -140,12 +144,39 @@ def value_iteration_over_jsonl(
         output_path = input_path.with_suffix(".valued.jsonl")
 
     augmented: List[Dict] = []
+    times: List[float] = []
     with input_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            traj = json.loads(line)
-            augmented.append(compute_values_for_trajectory(traj, cfg))
+        lines = f.readlines()
+
+    total = len(lines)
+    log.info("Processing %d trajectories for value iteration", total)
+
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        step_start = time.time()
+        traj = json.loads(line)
+        augmented.append(compute_values_for_trajectory(traj, cfg))
+        elapsed = time.time() - step_start
+        times.append(elapsed)
+
+        processed = idx + 1
+        remaining = total - processed
+        if times:
+            avg = sum(times) / len(times)
+            eta_s = avg * remaining
+            h, r = divmod(int(eta_s), 3600)
+            m, s = divmod(r, 60)
+            eta_str = (
+                f"{h}h {m}m {s}s" if h else
+                f"{m}m {s}s" if m else
+                f"{s}s"
+            )
+            log.info(
+                "Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+                processed, total, 100.0 * processed / total,
+                elapsed, avg, eta_str,
+            )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
