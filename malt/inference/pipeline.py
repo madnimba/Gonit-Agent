@@ -50,6 +50,9 @@ class InferenceConfig:
 
     num_samples: int = 3
 
+    # If True, print one line per dev example during inference (off by default).
+    show_progress: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Low-level generation helper
@@ -137,7 +140,8 @@ def run_single_agent_generator(
         extract_fn, normalize_fn = _get_answer_fns(ex)
         answers: List[str] = []
 
-        for _ in range(cfg.num_samples):
+        for i in range(cfg.num_samples):
+            print(f"Solving {i}/{cfg.num_samples}")
             prompt = build_generator_prompt(ex.question)
             gen_text = _generate_single(
                 model=model,
@@ -171,8 +175,14 @@ def run_multi_agent_malt(
     cfg: InferenceConfig,
 ) -> List[str]:
     final_answers: List[str] = []
+    n = len(questions)
 
-    for ex in questions:
+    for i, ex in enumerate(questions):
+        if cfg.show_progress:
+            print(
+                f"  example {i + 1}/{n} (×{cfg.num_samples} G→V→R chains) ...",
+                flush=True,
+            )
         extract_fn, normalize_fn = _get_answer_fns(ex)
         answers: List[str] = []
 

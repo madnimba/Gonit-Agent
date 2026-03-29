@@ -9,6 +9,7 @@ import time
 
 from torch.utils.data import Dataset
 from transformers import (
+    DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
     PreTrainedTokenizerBase,
@@ -50,8 +51,8 @@ class SftTrainingConfig:
     output_dir: Path
 
     num_train_epochs: int = 3
-    per_device_train_batch_size: int = 4
-    gradient_accumulation_steps: int = 2
+    per_device_train_batch_size: int = 1
+    gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-5
     max_seq_length: int = 2048
     max_train_samples: int | None = None
@@ -280,6 +281,11 @@ def _run_sft(
         pairs=formatted_pairs,
         max_seq_length=cfg.max_seq_length,
     )
+    
+    model.config.use_cache = False
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
 
     training_args = TrainingArguments(
         output_dir=str(cfg.output_dir),
@@ -292,13 +298,24 @@ def _run_sft(
         save_total_limit=cfg.save_total_limit,
         bf16=cfg.bf16,
         fp16=cfg.fp16,
+        gradient_checkpointing=True,
         report_to=[],
+    )
+    
+    # Variable-length sequences per sample: default collator stacks and fails when
+    # per_device_train_batch_size > 1. Pad to longest in batch; -100 labels skip loss on padding.
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        label_pad_token_id=-100,
+        padding="longest",
     )
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
+        data_collator=data_collator,
     )
 
     trainer.train()

@@ -47,8 +47,8 @@ class DpoTrainingConfig:
     beta: float = 0.2
 
     num_train_epochs: int = 1
-    per_device_train_batch_size: int = 2
-    gradient_accumulation_steps: int = 4
+    per_device_train_batch_size: int = 1
+    gradient_accumulation_steps: int = 8
     learning_rate: float = 5e-6
     max_seq_length: int = 2048
     max_train_samples: int | None = None

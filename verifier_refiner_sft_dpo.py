@@ -25,8 +25,18 @@ def cleanup():
 
 valued_path = Path("data/all_trajectories.valued.jsonl")
 
-v_sft_cfg = SftTrainingConfig(output_dir=Path("checkpoints/verifier_sft"), num_train_epochs=3)
-r_sft_cfg = SftTrainingConfig(output_dir=Path("checkpoints/refiner_sft"), num_train_epochs=3)
+v_sft_cfg = SftTrainingConfig(
+    output_dir=Path("checkpoints/verifier_sft"),
+    num_train_epochs=3,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+)
+r_sft_cfg = SftTrainingConfig(
+    output_dir=Path("checkpoints/refiner_sft"),
+    num_train_epochs=3,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+)
 
 train_verifier_sft(valued_path, v_sft_cfg, task="somadhan")
 cleanup()
@@ -34,8 +44,16 @@ cleanup()
 train_refiner_sft(valued_path, r_sft_cfg, task="somadhan")
 cleanup()
 
-v_dpo_cfg = DpoTrainingConfig(output_dir=Path("checkpoints/verifier_dpo"))
-r_dpo_cfg = DpoTrainingConfig(output_dir=Path("checkpoints/refiner_dpo"))
+v_dpo_cfg = DpoTrainingConfig(
+    output_dir=Path("checkpoints/verifier_dpo"),
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+)
+r_dpo_cfg = DpoTrainingConfig(
+    output_dir=Path("checkpoints/refiner_dpo"),
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+)
 
 train_verifier_dpo(valued_path, v_dpo_cfg, task="somadhan")
 cleanup()
