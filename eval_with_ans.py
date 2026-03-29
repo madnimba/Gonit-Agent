@@ -9,10 +9,10 @@ Reports four configurations:
 
 Usage (from repo root; ensure ``malt`` is importable, e.g. ``PYTHONPATH=.``):
 
-  PYTHONPATH=. python scripts/eval_malt.py --devset data/somadhan_dev.csv
+  PYTHONPATH=. python eval_with_ans.py --devset data/somadhan_dev.csv
 
   # With trained checkpoints:
-  PYTHONPATH=. python scripts/eval_malt.py --devset data/somadhan_dev.csv \\
+  PYTHONPATH=. python eval_with_ans.py --devset data/somadhan_dev.csv \\
       --gen-checkpoint checkpoints/generator_sft \\
       --ver-checkpoint checkpoints/verifier_dpo \\
       --ref-checkpoint checkpoints/refiner_dpo
@@ -21,7 +21,7 @@ Usage (from repo root; ensure ``malt`` is importable, e.g. ``PYTHONPATH=.``):
   PYTHONPATH=. python scripts/eval_malt.py --devset data/dev.csv --quiet
 
   # Per-example JSONL (question + labeled phases with raw + extracted answer):
-  PYTHONPATH=. python scripts/eval_malt.py --devset data/dev.csv \\
+  PYTHONPATH=. python eval_with_ans.py --devset data/dev.csv \\
       --dump-predictions output/eval_predictions.jsonl \\
       --gen-checkpoint checkpoints/generator_sft \\
       --ver-checkpoint checkpoints/verifier_dpo \\

@@ -9,16 +9,16 @@ Reports four configurations:
 
 Usage (from repo root; ensure ``malt`` is importable, e.g. ``PYTHONPATH=.``):
 
-  PYTHONPATH=. python scripts/eval_malt.py --devset data/somadhan_dev.csv
+  PYTHONPATH=. python eval_malt.py --devset data/somadhan_dev.csv
 
   # With trained checkpoints:
-  PYTHONPATH=. python scripts/eval_malt.py --devset data/somadhan_dev.csv \\
+  PYTHONPATH=. python eval_malt.py --devset data/somadhan_dev.csv \\
       --gen-checkpoint checkpoints/generator_sft \\
       --ver-checkpoint checkpoints/verifier_dpo \\
       --ref-checkpoint checkpoints/refiner_dpo
 
   # Suppress progress lines:
-  PYTHONPATH=. python scripts/eval_malt.py --devset data/dev.csv --quiet
+  PYTHONPATH=. python eval_malt.py --devset data/dev.csv --quiet
 """
 
 import argparse
