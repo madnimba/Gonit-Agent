@@ -235,17 +235,14 @@ baseline_preds = run_qwen_zero_shot(base_model, base_tok, questions, qwen_cfg)
 ### Eval script
 
 ```bash
-python scripts/eval_malt.py --devset data/somadhan_dev.csv --num-samples 3 \
+PYTHONPATH=. python eval_malt.py --devset data/somadhan_dev.csv --output-dir runs/eval \
+  --num-samples 3 \
   --gen-checkpoint checkpoints/generator_sft \
   --ver-checkpoint checkpoints/verifier_dpo \
   --ref-checkpoint checkpoints/refiner_dpo
 ```
 
-This returns:
-- GanitLLM base zero-shot
-- GanitLLM base MV
-- Trained generator-only MV
-- MALT G→V→R MV
+This reports (with all three checkpoints): GanitLLM zero-shot; GanitLLM majority-vote; then four MALT ablations with one chain each (untrained generator + trained V/R; trained G/R + untrained verifier; trained G/V + untrained refiner; fully trained G→V→R). See `eval_malt.py` / `run.md` for details.
 
 ---
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Sequence, Union
 
 import torch
+from tqdm.auto import tqdm
 from peft import PeftModel
 from transformers import PreTrainedTokenizerBase
 
@@ -53,9 +54,12 @@ class InferenceConfig:
     # If True, print one line per dev example during inference (off by default).
     show_progress: bool = False
 
+    # Label for tqdm when show_progress is True (per-example progress + ETA).
+    progress_desc: str | None = None
+
 
 # ---------------------------------------------------------------------------
-# Low-level generation helper
+# Low-level generation helpers
 # ---------------------------------------------------------------------------
 
 def _generate_single(
@@ -102,6 +106,62 @@ def _generate_single(
         return gen_text.strip()
 
 
+def _generate_batch(
+    model: PeftModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompts: Sequence[str],
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+) -> List[str]:
+    """
+    Generate one completion per prompt (batched).
+
+    *prompts* should be raw user-message content strings (not chat-formatted).
+    This function applies the chat template per prompt, batches tokenization,
+    and decodes the generated continuation for each row.
+    """
+    if not prompts:
+        return []
+
+    formatted = [format_chat_prompt(tokenizer, p) for p in prompts]
+
+    model.eval()
+    with torch.inference_mode():
+        inputs = tokenizer(
+            formatted,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+        )
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        gen_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            pad_token_id=tokenizer.pad_token_id,
+            use_cache=True,
+        )
+
+        # Per-row prompt lengths (works for left- or right-padding).
+        attn = inputs.get("attention_mask", None)
+        if attn is None:
+            input_lens = [inputs["input_ids"].shape[1]] * gen_ids.shape[0]
+        else:
+            input_lens = attn.sum(dim=1).tolist()
+
+        outputs: List[str] = []
+        for row, in_len in zip(gen_ids, input_lens):
+            text = tokenizer.decode(row[int(in_len):], skip_special_tokens=True)
+            outputs.append(text.strip())
+        return outputs
+
+
 # ---------------------------------------------------------------------------
 # Majority-vote helper
 # ---------------------------------------------------------------------------
@@ -135,26 +195,50 @@ def run_single_agent_generator(
     cfg: InferenceConfig,
 ) -> List[str]:
     final_answers: List[str] = []
+    n = len(questions)
 
-    for ex in questions:
-        extract_fn, normalize_fn = _get_answer_fns(ex)
-        answers: List[str] = []
+    # Strategy: batch over examples, and if num_samples>1, do k batched passes.
+    # This avoids a giant (batch_size * k) prompt list that can OOM.
+    pbar = tqdm(
+        total=n,
+        desc=cfg.progress_desc or "Generator",
+        unit="ex",
+        disable=not cfg.show_progress,
+    )
 
-        for i in range(cfg.num_samples):
-            print(f"Solving {i}/{cfg.num_samples}")
-            prompt = build_generator_prompt(ex.question)
-            gen_text = _generate_single(
+    # Process in chunks to keep GPU memory predictable.
+    chunk_size = n  # default: one batch (callers can pass subsets for chunking)
+    # Heuristic: if show_progress, tqdm is per-example anyway; chunking is still useful.
+    # Callers can chunk at a higher layer by calling this function on subsets.
+    start = 0
+    while start < n:
+        end = min(n, start + chunk_size)
+        chunk = list(questions[start:end])
+
+        # Collect k samples per example (answers_acc[i] is list of raw generations).
+        answers_acc: List[List[str]] = [[] for _ in range(len(chunk))]
+        for _ in range(cfg.num_samples):
+            prompts = [build_generator_prompt(ex.question) for ex in chunk]
+            gen_texts = _generate_batch(
                 model=model,
                 tokenizer=tokenizer,
-                prompt=prompt,
+                prompts=prompts,
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_p=cfg.top_p,
                 top_k=cfg.top_k,
             )
-            answers.append(gen_text)
+            for i, txt in enumerate(gen_texts):
+                answers_acc[i].append(txt)
 
-        final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
+        for ex, answers in zip(chunk, answers_acc):
+            extract_fn, normalize_fn = _get_answer_fns(ex)
+            final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
+
+        pbar.update(len(chunk))
+        start = end
+
+    pbar.close()
 
     return final_answers
 
@@ -177,53 +261,79 @@ def run_multi_agent_malt(
     final_answers: List[str] = []
     n = len(questions)
 
-    for i, ex in enumerate(questions):
-        if cfg.show_progress:
-            print(
-                f"  example {i + 1}/{n} (×{cfg.num_samples} G→V→R chains) ...",
-                flush=True,
-            )
-        extract_fn, normalize_fn = _get_answer_fns(ex)
-        answers: List[str] = []
+    pbar = tqdm(
+        total=n,
+        desc=cfg.progress_desc or "MALT G→V→R",
+        unit="ex",
+        disable=not cfg.show_progress,
+    )
+
+    chunk_size = n  # callers can pass subsets for chunking
+    start = 0
+    while start < n:
+        end = min(n, start + chunk_size)
+        chunk = list(questions[start:end])
+
+        # For each example in chunk, collect cfg.num_samples refined outputs.
+        answers_acc: List[List[str]] = [[] for _ in range(len(chunk))]
 
         for _ in range(cfg.num_samples):
+            # G stage
             set_active_role_adapter(generator_model, ROLE_GENERATOR)
-            g_text = _generate_single(
+            g_prompts = [build_generator_prompt(ex.question) for ex in chunk]
+            g_texts = _generate_batch(
                 model=generator_model,
                 tokenizer=tokenizer,
-                prompt=build_generator_prompt(ex.question),
+                prompts=g_prompts,
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_p=cfg.top_p,
                 top_k=cfg.top_k,
             )
 
+            # V stage
             set_active_role_adapter(verifier_model, ROLE_VERIFIER)
-            v_text = _generate_single(
+            v_prompts = [
+                build_verifier_prompt(ex.question, g_text)
+                for ex, g_text in zip(chunk, g_texts)
+            ]
+            v_texts = _generate_batch(
                 model=verifier_model,
                 tokenizer=tokenizer,
-                prompt=build_verifier_prompt(ex.question, g_text),
+                prompts=v_prompts,
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_p=cfg.top_p,
                 top_k=cfg.top_k,
             )
 
+            # R stage
             set_active_role_adapter(refiner_model, ROLE_REFINER)
-            r_text = _generate_single(
+            r_prompts = [
+                build_refiner_prompt(ex.question, g_text, v_text)
+                for ex, g_text, v_text in zip(chunk, g_texts, v_texts)
+            ]
+            r_texts = _generate_batch(
                 model=refiner_model,
                 tokenizer=tokenizer,
-                prompt=build_refiner_prompt(ex.question, g_text, v_text),
+                prompts=r_prompts,
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_p=cfg.top_p,
                 top_k=cfg.top_k,
             )
 
-            answers.append(r_text)
+            for i, txt in enumerate(r_texts):
+                answers_acc[i].append(txt)
 
-        final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
+        for ex, answers in zip(chunk, answers_acc):
+            extract_fn, normalize_fn = _get_answer_fns(ex)
+            final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
 
+        pbar.update(len(chunk))
+        start = end
+
+    pbar.close()
     return final_answers
 
 

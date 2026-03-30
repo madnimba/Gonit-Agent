@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import re
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import List
 
@@ -96,19 +97,63 @@ def Somadhan_exact_match(predicted: str, target: str) -> bool:
     return pred_final == target_final
 
 
+def _load_tsv_somadhan_split(tsv_path: Path, id_start: int) -> List[SomadhanExample]:
+    """Two tab-separated columns per row: question, answer (optional header row)."""
+    examples: List[SomadhanExample] = []
+    with tsv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.reader(f, delimiter="\t")
+        rows_iter = iter(reader)
+        first = next(rows_iter, None)
+        if first is None:
+            return examples
+        if (
+            len(first) >= 2
+            and first[0].strip().lower() == "question"
+            and first[1].strip().lower() == "answer"
+        ):
+            data_rows = rows_iter
+        else:
+            data_rows = chain([first], rows_iter)
+
+        for idx, row in enumerate(data_rows):
+            if not row or (len(row) == 1 and not row[0].strip()):
+                continue
+            if len(row) < 2:
+                raise ValueError(
+                    f"Row {idx + 1} in {tsv_path}: expected 2 tab-separated columns, got {len(row)}"
+                )
+            question = row[0].strip()
+            answer_raw = row[1].strip()
+            answer_target = extract_Somadhan_answer(answer_raw)
+            examples.append(
+                SomadhanExample(
+                    id=str(id_start + len(examples)),
+                    question=question,
+                    answer_raw=answer_raw,
+                    answer_target=answer_target,
+                )
+            )
+
+    return examples
+
+
 def load_Somadhan_split(
     csv_path: str | Path,
     id_start: int = 1,
 ) -> List[SomadhanExample]:
     """
-    Load the full Somadhan dataset from a CSV file.
+    Load examples from a Somadhan-style dev file.
 
-    The CSV is expected to have at minimum the columns:
-        - question
-        - answer
+    Supported formats:
 
-    An optional 'id' column is used if present; otherwise IDs are assigned
-    sequentially starting from *id_start*.  For chunked trajectory
+    * **CSV** with columns ``question`` and ``answer`` (optional ``id``), e.g. SOMADHAN.csv.
+    * **CSV** with columns ``m_query`` and ``response`` (e.g. bn-msvamp.csv).
+    * **TSV** (``.tsv``): two tab-separated columns per line, question then answer.
+      An optional header row ``question<TAB>answer`` is recognized; otherwise the
+      first line is treated as data (e.g. mgsm_bn.tsv).
+
+    An optional ``id`` column is used when present on CSV rows; otherwise IDs are
+    assigned sequentially starting from *id_start*.  For chunked trajectory
     generation across multiple machines, use different id_start values
     (e.g. 1 for chunk 1, 1001 for chunk 2) so that IDs are globally unique
     after merging the output JSONL files.
@@ -116,6 +161,9 @@ def load_Somadhan_split(
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    if csv_path.suffix.lower() == ".tsv":
+        return _load_tsv_somadhan_split(csv_path, id_start)
 
     examples: List[SomadhanExample] = []
 
@@ -125,16 +173,20 @@ def load_Somadhan_split(
         if reader.fieldnames is None:
             raise ValueError(f"CSV file appears to be empty: {csv_path}")
 
-        missing = {"question", "answer"} - set(reader.fieldnames)
-        if missing:
+        fields = set(reader.fieldnames)
+        if "question" in fields and "answer" in fields:
+            q_key, a_key = "question", "answer"
+        elif "m_query" in fields and "response" in fields:
+            q_key, a_key = "m_query", "response"
+        else:
             raise ValueError(
-                f"CSV is missing required columns: {missing}. "
+                "CSV must have columns (question, answer) or (m_query, response). "
                 f"Found columns: {list(reader.fieldnames)}"
             )
 
         for idx, row in enumerate(reader):
-            question = row.get("question", "").strip()
-            answer_raw = row.get("answer", "").strip()
+            question = row.get(q_key, "").strip()
+            answer_raw = row.get(a_key, "").strip()
             answer_target = extract_Somadhan_answer(answer_raw)
             examples.append(
                 SomadhanExample(
