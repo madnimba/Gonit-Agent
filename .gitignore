@@ -1,6 +1,7 @@
 checkpoints/*
 data/*
 output/*
+runs/*
 */__pycache__/*
 *.pdf
 */*/__pycache__/*
