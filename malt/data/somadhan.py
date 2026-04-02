@@ -35,37 +35,26 @@ class SomadhanExample:
 
 
 def extract_Somadhan_answer(answer_text: str) -> str:
-    """
-    Extract the final answer from a Somadhan solution or model output.
-
-    Handles multiple formats in priority order:
-      1. <answer>...</answer> tags  (GanitLLM model output)
-      2. #### marker               (SOMADHAN CSV ground truth)
-      3. Last numeric token         (fallback)
-
-    Any <think>...</think> blocks are stripped before extraction.
-    Bengali digits are converted to Arabic in the result.
-    """
-    # Strip thinking blocks that Qwen3 models sometimes produce.
-    text = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.DOTALL)
-
-    # 1) <answer>...</answer> tags
-    m = re.search(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL)
+    # 1) Check for <answer> tag BEFORE stripping <think> blocks,
+    #    because Qwen3 often places <answer> inside <think>.
+    m = re.search(r"<answer>\s*(.*?)\s*</answer>", answer_text, flags=re.DOTALL)
     if m:
         return _bengali_to_arabic(m.group(1).strip())
 
-    # 2) #### marker (GSM8K / SOMADHAN ground-truth style)
+    # Now safe to strip <think> blocks (no <answer> tag was inside them).
+    text = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.DOTALL)
+
+    # 2) #### marker
     if "####" in text:
         final = text.split("####", maxsplit=1)[-1]
         return _bengali_to_arabic(final.strip())
 
-    # 3) Last numeric token (Bengali or Arabic)
+    # 3) Last numeric token fallback
     numeric_matches = re.findall(r"-?[\d০-৯]+(?:\.[\d০-৯]+)?", text)
     if numeric_matches:
         return _bengali_to_arabic(numeric_matches[-1].strip())
 
     return _bengali_to_arabic(text.strip())
-
 
 def normalize_Somadhan_answer(text: str) -> str:
     """

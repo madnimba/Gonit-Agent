@@ -178,10 +178,9 @@ def _majority_vote(
         normalize_fn(extract_fn(a)) for a in answers
     )
     best_norm, _ = norm_counts.most_common(1)[0]
-    for a in answers:
-        if normalize_fn(extract_fn(a)) == best_norm:
-            return a
-    return ""
+    # Return the extracted+normalized answer string directly,
+    # NOT the raw full generation. Callers (eval) must not re-parse.
+    return best_norm
 
 
 # ---------------------------------------------------------------------------
