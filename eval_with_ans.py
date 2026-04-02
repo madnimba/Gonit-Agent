@@ -285,6 +285,13 @@ def main() -> None:
         import gc
         import torch
 
+        if model is not None:
+            del model, tok
+            model, tok = None, None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         def run_malt_phase(
             phase_num: int,
             desc: str,
@@ -338,7 +345,7 @@ def main() -> None:
             _log_phase_eta(verbose, f"Phase {phase_num}", t_phase, phase_times, total_phases)
             stats = evaluate_somadhan_predictions([p for p in pred_store if p is not None], gt_answers)
 
-            del model2
+            del model2, tok2
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
