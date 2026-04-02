@@ -8,6 +8,7 @@ adapters for the Generator (G), Verifier (V), and Refiner (R) roles.
 
 from .base_model import (
     MaltModelConfig,
+    load_ganit_llm_base,
     load_malt_llama_with_adapters,
     load_malt_llama_with_trained_adapters,
     set_active_role_adapter,
@@ -18,6 +19,7 @@ from .base_model import (
 
 __all__ = [
     "MaltModelConfig",
+    "load_ganit_llm_base",
     "load_malt_llama_with_adapters",
     "load_malt_llama_with_trained_adapters",
     "set_active_role_adapter",

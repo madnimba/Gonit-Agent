@@ -250,6 +250,46 @@ run_single_agent_generator_gsm8k = run_single_agent_generator
 # Multi-agent MALT inference
 # ---------------------------------------------------------------------------
 
+def _generate_malt_role(
+    model: PeftModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompts: Sequence[str],
+    cfg: InferenceConfig,
+    *,
+    role: str,
+    use_lora: bool,
+) -> List[str]:
+    """
+    Run one MALT stage. If *use_lora* is False, run the frozen HF base (no LoRA),
+    matching ``load_ganit_llm_base`` behavior instead of random init adapters.
+    """
+    if use_lora:
+        set_active_role_adapter(model, role)
+        return _generate_batch(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=prompts,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature,
+            top_p=cfg.top_p,
+            top_k=cfg.top_k,
+        )
+    if not hasattr(model, "disable_adapter"):
+        raise TypeError(
+            "Untrained-role MALT stages require PeftModel.disable_adapter(); upgrade peft."
+        )
+    with model.disable_adapter():
+        return _generate_batch(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=prompts,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature,
+            top_p=cfg.top_p,
+            top_k=cfg.top_k,
+        )
+
+
 def run_multi_agent_malt(
     generator_model: PeftModel,
     verifier_model: PeftModel,
@@ -257,7 +297,16 @@ def run_multi_agent_malt(
     tokenizer: PreTrainedTokenizerBase,
     questions: Sequence[AnyExample],
     cfg: InferenceConfig,
+    *,
+    use_lora_generator: bool = True,
+    use_lora_verifier: bool = True,
+    use_lora_refiner: bool = True,
 ) -> List[str]:
+    """
+    MALT G→V→R chain. For each role, *use_lora_<role>* selects trained LoRA weights;
+    if False, that stage runs on the HF base only (``disable_adapter()``), matching
+    published GanitLLM without random adapter init.
+    """
     final_answers: List[str] = []
     n = len(questions)
 
@@ -279,48 +328,42 @@ def run_multi_agent_malt(
 
         for _ in range(cfg.num_samples):
             # G stage
-            set_active_role_adapter(generator_model, ROLE_GENERATOR)
             g_prompts = [build_generator_prompt(ex.question) for ex in chunk]
-            g_texts = _generate_batch(
-                model=generator_model,
-                tokenizer=tokenizer,
-                prompts=g_prompts,
-                max_new_tokens=cfg.max_new_tokens,
-                temperature=cfg.temperature,
-                top_p=cfg.top_p,
-                top_k=cfg.top_k,
+            g_texts = _generate_malt_role(
+                generator_model,
+                tokenizer,
+                g_prompts,
+                cfg,
+                role=ROLE_GENERATOR,
+                use_lora=use_lora_generator,
             )
 
             # V stage
-            set_active_role_adapter(verifier_model, ROLE_VERIFIER)
             v_prompts = [
                 build_verifier_prompt(ex.question, g_text)
                 for ex, g_text in zip(chunk, g_texts)
             ]
-            v_texts = _generate_batch(
-                model=verifier_model,
-                tokenizer=tokenizer,
-                prompts=v_prompts,
-                max_new_tokens=cfg.max_new_tokens,
-                temperature=cfg.temperature,
-                top_p=cfg.top_p,
-                top_k=cfg.top_k,
+            v_texts = _generate_malt_role(
+                verifier_model,
+                tokenizer,
+                v_prompts,
+                cfg,
+                role=ROLE_VERIFIER,
+                use_lora=use_lora_verifier,
             )
 
             # R stage
-            set_active_role_adapter(refiner_model, ROLE_REFINER)
             r_prompts = [
                 build_refiner_prompt(ex.question, g_text, v_text)
                 for ex, g_text, v_text in zip(chunk, g_texts, v_texts)
             ]
-            r_texts = _generate_batch(
-                model=refiner_model,
-                tokenizer=tokenizer,
-                prompts=r_prompts,
-                max_new_tokens=cfg.max_new_tokens,
-                temperature=cfg.temperature,
-                top_p=cfg.top_p,
-                top_k=cfg.top_k,
+            r_texts = _generate_malt_role(
+                refiner_model,
+                tokenizer,
+                r_prompts,
+                cfg,
+                role=ROLE_REFINER,
+                use_lora=use_lora_refiner,
             )
 
             for i, txt in enumerate(r_texts):

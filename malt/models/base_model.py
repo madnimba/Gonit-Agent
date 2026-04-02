@@ -12,6 +12,7 @@ import torch
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    PreTrainedModel,
 )
 
 try:
@@ -211,6 +212,40 @@ def _build_quantization_config(cfg: MaltModelConfig):
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
+
+def load_ganit_llm_base(
+    cfg: MaltModelConfig | None = None,
+) -> Tuple[PreTrainedModel, AutoTokenizer]:
+    """
+    Load GanitLLM from Hugging Face with no LoRA adapters (published weights only).
+
+    Use this for baseline evaluation against the actual GanitLLM checkpoint;
+    contrast with ``load_malt_llama_with_adapters``, which wraps the same base
+    in randomly initialized role LoRAs for MALT training/inference.
+    """
+    cfg = cfg or MaltModelConfig()
+
+    release_gpu_memory()
+    check_gpu_memory()
+
+    quant_config = _build_quantization_config(cfg)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        cfg.model_name,
+        device_map=cfg.device_map,
+        quantization_config=quant_config,
+        torch_dtype=cfg.torch_dtype if quant_config is None else None,
+        attn_implementation=cfg.attn_implementation,
+    )
+    log.info("GanitLLM base loaded (no LoRA): %s", cfg.model_name)
+
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    return model, tokenizer
+
 
 def load_malt_llama_with_adapters(
     cfg: MaltModelConfig | None = None,

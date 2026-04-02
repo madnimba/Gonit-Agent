@@ -3,11 +3,11 @@ Evaluate MALT-enhanced GanitLLM vs baseline on a Somadhan devset, and write
 per-example predictions + correctness.
 
 Phases (no majority vote for trained agents):
-  1. GanitLLM zero-shot (base generator), 1 sample/example (T≈0)
-  2. GanitLLM majority-vote (base generator), MV@k samples (T=0.3)
-  3. MALT ablation: untrained generator + trained verifier + refiner (1× chain, T≈0)
-  4. MALT ablation: trained generator + refiner + untrained verifier (1× chain, T≈0)
-  5. MALT ablation: trained generator/verifier + untrained refiner (1× chain, T≈0)
+  1. GanitLLM zero-shot (HF weights, no LoRA), 1 sample/example (T≈0)
+  2. GanitLLM majority-vote (HF weights, no LoRA), MV@k samples (T=0.3)
+  3. MALT ablation: HF-base generator + trained verifier + refiner (1× chain, T≈0)
+  4. MALT ablation: trained generator + refiner + HF-base verifier (1× chain, T≈0)
+  5. MALT ablation: trained generator/verifier + HF-base refiner (1× chain, T≈0)
   6. MALT full: trained generator + verifier + refiner (1× chain, T≈0)
 
 Phases 3–6 require all three checkpoints: --gen-checkpoint, --ver-checkpoint, --ref-checkpoint.
@@ -30,10 +30,8 @@ from malt.data import extract_Somadhan_answer, load_Somadhan_split, Somadhan_exa
 from malt.inference.pipeline import InferenceConfig, run_multi_agent_malt, run_single_agent_generator
 from malt.models import (
     MaltModelConfig,
-    load_malt_llama_with_adapters,
+    load_ganit_llm_base,
     load_malt_llama_with_trained_adapters,
-    set_active_role_adapter,
-    ROLE_GENERATOR,
 )
 from malt.utils.eval import EvalStats, evaluate_somadhan_predictions
 
@@ -136,11 +134,11 @@ def _eval_summary_lines(
         "Somadhan Devset Evaluation Results",
         "=" * 60,
         (
-            f"GanitLLM zero-shot (T≈0):   {base_stats.correct}/{base_stats.total}  "
+            f"GanitLLM zero-shot HF, no LoRA (T≈0):   {base_stats.correct}/{base_stats.total}  "
             f"acc={base_stats.accuracy:.4f}"
         ),
         (
-            f"GanitLLM majority-vote MV@{num_samples} (T=0.3):     "
+            f"GanitLLM majority-vote HF, no LoRA MV@{num_samples} (T=0.3):     "
             f"{mv_stats.correct}/{mv_stats.total}  acc={mv_stats.accuracy:.4f}"
         ),
     ]
@@ -149,15 +147,15 @@ def _eval_summary_lines(
         lines.extend(
             [
                 (
-                    f"MALT untrained gen + trained ver/ref (1×):   {s_ut_g.correct}/{s_ut_g.total}  "
+                    f"MALT HF-base gen + trained ver/ref (1×):   {s_ut_g.correct}/{s_ut_g.total}  "
                     f"acc={s_ut_g.accuracy:.4f}"
                 ),
                 (
-                    f"MALT trained gen/ref + untrained ver (1×):   {s_ut_v.correct}/{s_ut_v.total}  "
+                    f"MALT trained gen/ref + HF-base ver (1×):   {s_ut_v.correct}/{s_ut_v.total}  "
                     f"acc={s_ut_v.accuracy:.4f}"
                 ),
                 (
-                    f"MALT trained gen/ver + untrained ref (1×):   {s_ut_r.correct}/{s_ut_r.total}  "
+                    f"MALT trained gen/ver + HF-base ref (1×):   {s_ut_r.correct}/{s_ut_r.total}  "
                     f"acc={s_ut_r.accuracy:.4f}"
                 ),
                 (
@@ -226,9 +224,7 @@ def main() -> None:
     model = None
     tok = None
     if need_phase1 or need_phase2:
-        llama_cfg = MaltModelConfig()
-        model, tok = load_malt_llama_with_adapters(llama_cfg)
-        set_active_role_adapter(model, ROLE_GENERATOR)
+        model, tok = load_ganit_llm_base(MaltModelConfig())
 
     if verbose:
         print(f"\nPhase 1/{total_phases}: GanitLLM zero-shot ...", flush=True)
@@ -323,7 +319,17 @@ def main() -> None:
                 unit="chunk",
             ):
                 subset = [examples[i] for i in idx_chunk]
-                preds_chunk = run_multi_agent_malt(model2, model2, model2, tok2, subset, malt_single_cfg)
+                preds_chunk = run_multi_agent_malt(
+                    model2,
+                    model2,
+                    model2,
+                    tok2,
+                    subset,
+                    malt_single_cfg,
+                    use_lora_generator=generator_ckpt is not None,
+                    use_lora_verifier=verifier_ckpt is not None,
+                    use_lora_refiner=refiner_ckpt is not None,
+                )
                 for local_pos, i in enumerate(idx_chunk):
                     pred = preds_chunk[local_pos]
                     pred_store[i] = pred
@@ -338,19 +344,19 @@ def main() -> None:
                 torch.cuda.empty_cache()
             return stats
 
-        s3_stats = run_malt_phase(3, "untrained gen + trained ver/ref", None, args.ver_checkpoint, args.ref_checkpoint, s3_preds)
-        s4_stats = run_malt_phase(4, "trained gen/ref + untrained ver", args.gen_checkpoint, None, args.ref_checkpoint, s4_preds)
-        s5_stats = run_malt_phase(5, "trained gen/ver + untrained ref", args.gen_checkpoint, args.ver_checkpoint, None, s5_preds)
+        s3_stats = run_malt_phase(3, "HF-base gen + trained ver/ref", None, args.ver_checkpoint, args.ref_checkpoint, s3_preds)
+        s4_stats = run_malt_phase(4, "trained gen/ref + HF-base ver", args.gen_checkpoint, None, args.ref_checkpoint, s4_preds)
+        s5_stats = run_malt_phase(5, "trained gen/ver + HF-base ref", args.gen_checkpoint, args.ver_checkpoint, None, s5_preds)
         s6_stats = run_malt_phase(6, "trained gen + ver + ref", args.gen_checkpoint, args.ver_checkpoint, args.ref_checkpoint, s6_preds)
 
         malt_ablation_stats = (s3_stats, s4_stats, s5_stats, s6_stats)
 
     # ---------------- Merge outputs into final JSONL + summary ----------------
-    p1 = f"Phase 1/{total_phases}: GanitLLM base zero-shot (T≈0, 1 sample / example)"
-    p2 = f"Phase 2/{total_phases}: GanitLLM base MV@{args.num_samples} (T=0.3, untrained LoRAs)"
-    p3 = "Phase 3/6: MALT untrained generator + trained verifier + refiner (1×)"
-    p4 = "Phase 4/6: MALT trained generator + refiner + untrained verifier (1×)"
-    p5 = "Phase 5/6: MALT trained generator/verifier + untrained refiner (1×)"
+    p1 = f"Phase 1/{total_phases}: GanitLLM HF base zero-shot (T≈0, 1 sample / example, no LoRA)"
+    p2 = f"Phase 2/{total_phases}: GanitLLM HF base MV@{args.num_samples} (T=0.3, no LoRA)"
+    p3 = "Phase 3/6: MALT HF-base generator + trained verifier + refiner (1×)"
+    p4 = "Phase 4/6: MALT trained generator + refiner + HF-base verifier (1×)"
+    p5 = "Phase 5/6: MALT trained generator/verifier + HF-base refiner (1×)"
     p6 = "Phase 6/6: MALT fully trained generator + verifier + refiner (1×)"
 
     pred_jsonl_path = out_dir / "eval_predictions.jsonl"
