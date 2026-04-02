@@ -32,7 +32,7 @@ def format_chat_prompt(tokenizer: PreTrainedTokenizerBase, user_content: str) ->
     try:
         return tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=False,
+            enable_thinking=True,
         )
     except TypeError:
         return tokenizer.apply_chat_template(
@@ -61,11 +61,11 @@ def format_chat_conversation(
     try:
         prompt_text = tokenizer.apply_chat_template(
             prompt_messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=False,
+            enable_thinking=True,
         )
         full_text = tokenizer.apply_chat_template(
             full_messages, tokenize=False,
-            enable_thinking=False,
+            enable_thinking=True,
         )
     except TypeError:
         prompt_text = tokenizer.apply_chat_template(

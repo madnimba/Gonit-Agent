@@ -44,8 +44,8 @@ def _get_answer_fns(
 class InferenceConfig:
     """Configuration for inference over any supported dataset."""
 
-    max_new_tokens: int = 1024
-    temperature: float = 0.3
+    max_new_tokens: int = 2048
+    temperature: float = 0.7
     top_p: float = 0.95
     top_k: int = 50
 
