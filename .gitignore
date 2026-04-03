@@ -1,5 +1,5 @@
 checkpoints/*
-data/*
+
 output/*
 runs/*
 */__pycache__/*
