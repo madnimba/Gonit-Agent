@@ -390,11 +390,12 @@ def main() -> None:
             return stats
 
         s3 = run_malt_phase(3, "HF-base gen + trained ver/ref",  None,                args.ver_checkpoint, args.ref_checkpoint, s3_preds)
-        s4 = run_malt_phase(4, "trained gen/ref + HF-base ver",  args.gen_checkpoint, None,                args.ref_checkpoint, s4_preds)
-        s5 = run_malt_phase(5, "trained gen/ver + HF-base ref",  args.gen_checkpoint, args.ver_checkpoint, None,                s5_preds)
+        # s4 = run_malt_phase(4, "trained gen/ref + HF-base ver",  args.gen_checkpoint, None,                args.ref_checkpoint, s4_preds)
+        # s5 = run_malt_phase(5, "trained gen/ver + HF-base ref",  args.gen_checkpoint, args.ver_checkpoint, None,                s5_preds)
         s6 = run_malt_phase(6, "trained gen + ver + ref",        args.gen_checkpoint, args.ver_checkpoint, args.ref_checkpoint, s6_preds)
 
-        malt_ablation_stats = (s3, s4, s5, s6)
+        # malt_ablation_stats = (s3, s4, s5, s6)
+        malt_ablation_stats = (s3, s6)
 
     summary      = _eval_summary_lines(args.num_samples, base_stats, mv_stats, malt_ablation_stats)
     results_path = out_dir / "eval_results.txt"
