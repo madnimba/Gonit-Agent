@@ -1,6 +1,9 @@
 """
 Generate G→V→R reasoning trajectories for Somadhan.
 
+Loads the published GanitLLM checkpoint from Hugging Face with no LoRA adapters
+(same weights for generator, verifier, and refiner prompts).
+
 Outputs are split into JSONL files of --chunk-size samples each (default
 500), written to an organized output folder.  A log file tracks progress
 so that a crashed run can be resumed cleanly.
@@ -138,7 +141,7 @@ def main() -> None:
     # Generation mode
     # ------------------------------------------------------------------
     from malt.data import load_Somadhan_split
-    from malt.models import MaltModelConfig, load_malt_llama_with_adapters
+    from malt.models import MaltModelConfig, load_ganit_llm_base
     from malt.search.tree_search import (
         TreeSearchConfig,
         run_tree_search_for_questions,
@@ -167,8 +170,8 @@ def main() -> None:
         use_torch_compile=False,
     )
 
-    model, tokenizer = load_malt_llama_with_adapters(MaltModelConfig())
-    log.info("Model loaded")
+    model, tokenizer = load_ganit_llm_base(MaltModelConfig())
+    log.info("Model loaded (GanitLLM HF base, no LoRA)")
 
     # ------------------------------------------------------------------
     # Process in chunks of --chunk-size, each chunk → one JSONL file

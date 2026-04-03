@@ -9,12 +9,12 @@ from typing import Iterable, List, Literal, Optional, Sequence, Union
 
 import torch
 from peft import PeftModel
-from transformers import PreTrainedTokenizerBase
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from malt.data import Gsm8kExample
 from malt.models import (
     MaltModelConfig,
-    load_malt_llama_with_adapters,
+    load_ganit_llm_base,
     set_active_role_adapter,
     ROLE_GENERATOR,
     ROLE_VERIFIER,
@@ -94,9 +94,17 @@ class GeneratorNode:
 
 _current_batch_size: Optional[int] = None
 
+AnyCausalLM = Union[PeftModel, PreTrainedModel]
+
+
+def _set_tree_search_role(model: AnyCausalLM, role: str) -> None:
+    """Switch LoRA adapter for PEFT models; no-op for plain HF base (GanitLLM)."""
+    if isinstance(model, PeftModel):
+        set_active_role_adapter(model, role)
+
 
 def _sample_texts(
-    model: PeftModel,
+    model: AnyCausalLM,
     tokenizer: PreTrainedTokenizerBase,
     prompts: Sequence[str],
     max_new_tokens: int,
@@ -184,7 +192,7 @@ def _sample_texts(
 # ---------------------------------------------------------------------------
 
 def run_tree_search_for_questions(
-    model: PeftModel,
+    model: AnyCausalLM,
     tokenizer: PreTrainedTokenizerBase,
     questions: Sequence[AnyExample],
     cfg: TreeSearchConfig,
@@ -201,7 +209,7 @@ def run_tree_search_for_questions(
         step_start = time.time()
 
         # Stage 1: Generator
-        set_active_role_adapter(model, ROLE_GENERATOR)
+        _set_tree_search_role(model, ROLE_GENERATOR)
 
         g_user = build_generator_prompt(ex.question)
         gen_prompts = [format_chat_prompt(tokenizer, g_user) for _ in range(n)]
@@ -217,7 +225,7 @@ def run_tree_search_for_questions(
         )
 
         # Stage 2: Verifier
-        set_active_role_adapter(model, ROLE_VERIFIER)
+        _set_tree_search_role(model, ROLE_VERIFIER)
 
         v_prompts: List[str] = []
         for g_text in gen_texts:
@@ -240,7 +248,7 @@ def run_tree_search_for_questions(
         ]
 
         # Stage 3: Refiner
-        set_active_role_adapter(model, ROLE_REFINER)
+        _set_tree_search_role(model, ROLE_REFINER)
 
         r_prompts: List[str] = []
         for g_idx, g_text in enumerate(gen_texts):
@@ -349,8 +357,8 @@ def _run_tree_search(
             before - len(examples),
         )
 
-    model, tokenizer = load_malt_llama_with_adapters(model_cfg)
-    log.info("Model loaded")
+    model, tokenizer = load_ganit_llm_base(model_cfg)
+    log.info("Model loaded (GanitLLM HF base, no LoRA)")
 
     if cfg.use_torch_compile:
         log.info("Compiling model with torch.compile(mode='reduce-overhead')…")
