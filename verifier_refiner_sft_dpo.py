@@ -12,7 +12,7 @@ from pathlib import Path
 import gc
 import torch
 
-from malt.training.sft_trainer import SftTrainingConfig, train_verifier_sft, train_refiner_sft
+from malt.training.sft_trainer import SftTrainingConfig, train_verifier_and_refiner_sft
 from malt.training.dpo_trainer import DpoTrainingConfig, train_verifier_dpo, train_refiner_dpo
 
 
@@ -38,10 +38,7 @@ r_sft_cfg = SftTrainingConfig(
     gradient_accumulation_steps=8,
 )
 
-train_verifier_sft(valued_path, v_sft_cfg, task="somadhan")
-cleanup()
-
-train_refiner_sft(valued_path, r_sft_cfg, task="somadhan")
+train_verifier_and_refiner_sft(valued_path, v_sft_cfg, r_sft_cfg, task="somadhan")
 cleanup()
 
 v_dpo_cfg = DpoTrainingConfig(

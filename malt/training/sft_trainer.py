@@ -107,6 +107,7 @@ class SupervisedTextDataset(Dataset):
         enc = self.tokenizer(
             full_text,
             truncation=True,
+            add_special_tokens=False,
             max_length=self.max_seq_length,
             return_tensors="pt",
         )
@@ -121,6 +122,17 @@ class SupervisedTextDataset(Dataset):
             "attention_mask": attention_mask,
             "labels": labels,
         }
+
+
+def _format_eta(eta_s: float) -> str:
+    """Format a duration in seconds into a human-readable ETA string."""
+    h, remainder = divmod(int(eta_s), 3600)
+    mins, secs = divmod(remainder, 60)
+    if h:
+        return f"{h}h {mins}m {secs}s"
+    if mins:
+        return f"{mins}m {secs}s"
+    return f"{secs}s"
 
 
 def _build_generator_text_pairs_from_trajectories(
@@ -138,38 +150,30 @@ def _build_generator_text_pairs_from_trajectories(
     samples: List[GeneratorSftSample] = build_generator_sft_samples(valued)
 
     if max_train_samples is not None:
-        samples = samples[: max_train_samples]
+        samples = samples[:max_train_samples]
 
     text_pairs: List[Tuple[str, str]] = []
     times: List[float] = []
     total = len(samples)
     log.info("Building %d generator SFT text pairs", total)
 
-    for idx, s in enumerate(samples):
+    for idx, sample in enumerate(samples):
         step_start = time.time()
-        prompt = build_generator_prompt(s.question)
-        response = s.generator_output
+        prompt = build_generator_prompt(sample.question)
+        response = sample.generator_output
         text_pairs.append((prompt, response))
         elapsed = time.time() - step_start
         times.append(elapsed)
 
         processed = idx + 1
         remaining = total - processed
-        if times:
-            avg = sum(times) / len(times)
-            eta_s = avg * remaining
-            h, r = divmod(int(eta_s), 3600)
-            m, s = divmod(r, 60)
-            eta_str = (
-                f"{h}h {m}m {s}s" if h else
-                f"{m}m {s}s" if m else
-                f"{s}s"
-            )
-            log.info(
-                "Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
-                processed, total, 100.0 * processed / total,
-                elapsed, avg, eta_str,
-            )
+        avg = sum(times) / len(times)
+        eta_str = _format_eta(avg * remaining)
+        log.info(
+            "Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+            processed, total, 100.0 * processed / total,
+            elapsed, avg, eta_str,
+        )
 
     return text_pairs
 
@@ -189,74 +193,58 @@ def _build_verifier_and_refiner_text_pairs_from_trajectories(
     v_samples, r_samples = build_verifier_and_refiner_sft_samples(valued)
 
     if max_train_samples is not None:
-        v_samples = v_samples[: max_train_samples]
-        r_samples = r_samples[: max_train_samples]
+        v_samples = v_samples[:max_train_samples]
+        r_samples = r_samples[:max_train_samples]
 
     v_pairs: List[Tuple[str, str]] = []
     times: List[float] = []
     total_v = len(v_samples)
     log.info("Building %d verifier SFT text pairs", total_v)
 
-    for idx, s in enumerate(v_samples):
+    for idx, sample in enumerate(v_samples):
         step_start = time.time()
-        prompt = build_verifier_prompt(s.question, s.generator_output)
-        response = s.verifier_output
+        prompt = build_verifier_prompt(sample.question, sample.generator_output)
+        response = sample.verifier_output
         v_pairs.append((prompt, response))
         elapsed = time.time() - step_start
         times.append(elapsed)
 
         processed = idx + 1
         remaining = total_v - processed
-        if times:
-            avg = sum(times) / len(times)
-            eta_s = avg * remaining
-            h, r = divmod(int(eta_s), 3600)
-            m, s = divmod(r, 60)
-            eta_str = (
-                f"{h}h {m}m {s}s" if h else
-                f"{m}m {s}s" if m else
-                f"{s}s"
-            )
-            log.info(
-                "Verifier Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
-                processed, total_v, 100.0 * processed / total_v,
-                elapsed, avg, eta_str,
-            )
+        avg = sum(times) / len(times)
+        eta_str = _format_eta(avg * remaining)
+        log.info(
+            "Verifier Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+            processed, total_v, 100.0 * processed / total_v,
+            elapsed, avg, eta_str,
+        )
 
     r_pairs: List[Tuple[str, str]] = []
     times = []
     total_r = len(r_samples)
     log.info("Building %d refiner SFT text pairs", total_r)
 
-    for idx, s in enumerate(r_samples):
+    for idx, sample in enumerate(r_samples):
         step_start = time.time()
         prompt = build_refiner_prompt(
-            s.question,
-            s.generator_output,
-            s.verifier_output,
+            sample.question,
+            sample.generator_output,
+            sample.verifier_output,
         )
-        response = s.refiner_output
+        response = sample.refiner_output
         r_pairs.append((prompt, response))
         elapsed = time.time() - step_start
         times.append(elapsed)
 
         processed = idx + 1
         remaining = total_r - processed
-        if times:
-            avg = sum(times) / len(times)
-            eta_s = avg * remaining
-            h, r = divmod(int(eta_s), 3600)
-            m, s = divmod(r, 60)
-            eta_str = (
-                f"{h}h {m}m {s}s" if h else
-                f"{m}m {s}s" if m else
-                f"{s}s"
-            )
-            log.info(
-                "Refiner Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
-                processed, total_r, 100.0 * processed / total_r,
-                elapsed, avg, eta_str,
-            )
+        avg = sum(times) / len(times)
+        eta_str = _format_eta(avg * remaining)
+        log.info(
+            "Refiner Progress: %d/%d (%.1f%%) | Last: %.1fs | Avg: %.1fs | ETA: %s",
+            processed, total_r, 100.0 * processed / total_r,
+            elapsed, avg, eta_str,
+        )
 
     return v_pairs, r_pairs
 
@@ -281,11 +269,14 @@ def _run_sft(
         pairs=formatted_pairs,
         max_seq_length=cfg.max_seq_length,
     )
-    
+
     model.config.use_cache = False
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     model.gradient_checkpointing_enable()
+
+    # Ensure output directory exists before training begins.
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     training_args = TrainingArguments(
         output_dir=str(cfg.output_dir),
@@ -301,7 +292,7 @@ def _run_sft(
         gradient_checkpointing=True,
         report_to=[],
     )
-    
+
     # Variable-length sequences per sample: default collator stacks and fails when
     # per_device_train_batch_size > 1. Pad to longest in batch; -100 labels skip loss on padding.
     data_collator = DataCollatorForSeq2Seq(
@@ -320,8 +311,27 @@ def _run_sft(
 
     trainer.train()
 
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(cfg.output_dir))
+    # Save tokenizer alongside the model so the checkpoint is self-contained
+    # for inference without requiring the caller to supply it separately.
+    tokenizer.save_pretrained(str(cfg.output_dir))
+
+
+def _load_verifier_and_refiner_pairs(
+    valued_trajectories_path: Path,
+    max_train_samples: int | None,
+    task: TaskName,
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """
+    Shared helper used by both train_verifier_sft and train_refiner_sft so
+    that value iteration and prompt formatting are only performed once when
+    both roles are trained in the same process.
+    """
+    return _build_verifier_and_refiner_text_pairs_from_trajectories(
+        valued_trajectories_path=valued_trajectories_path,
+        max_train_samples=max_train_samples,
+        task=task,
+    )
 
 
 def train_generator_sft(
@@ -329,7 +339,7 @@ def train_generator_sft(
     cfg: SftTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
     task: TaskName = "somadhan",
-):
+) -> None:
     model_cfg = model_cfg or MaltModelConfig()
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
     set_active_role_adapter(model, ROLE_GENERATOR)
@@ -347,12 +357,12 @@ def train_verifier_sft(
     cfg: SftTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
     task: TaskName = "somadhan",
-):
+) -> None:
     model_cfg = model_cfg or MaltModelConfig()
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
     set_active_role_adapter(model, ROLE_VERIFIER)
 
-    v_pairs, _ = _build_verifier_and_refiner_text_pairs_from_trajectories(
+    v_pairs, _ = _load_verifier_and_refiner_pairs(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
         task=task,
@@ -365,14 +375,44 @@ def train_refiner_sft(
     cfg: SftTrainingConfig,
     model_cfg: MaltModelConfig | None = None,
     task: TaskName = "somadhan",
-):
+) -> None:
     model_cfg = model_cfg or MaltModelConfig()
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
     set_active_role_adapter(model, ROLE_REFINER)
 
-    _, r_pairs = _build_verifier_and_refiner_text_pairs_from_trajectories(
+    _, r_pairs = _load_verifier_and_refiner_pairs(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
         task=task,
     )
     _run_sft(model, tokenizer, r_pairs, cfg)
+
+
+def train_verifier_and_refiner_sft(
+    valued_trajectories_path: Path,
+    verifier_cfg: SftTrainingConfig,
+    refiner_cfg: SftTrainingConfig,
+    model_cfg: MaltModelConfig | None = None,
+    task: TaskName = "somadhan",
+) -> None:
+    """
+    Train both the verifier and refiner in a single pass over the trajectory
+    data.  Use this instead of calling train_verifier_sft and
+    train_refiner_sft separately to avoid redundant value iteration and
+    prompt-building work.
+    """
+    model_cfg = model_cfg or MaltModelConfig()
+
+    v_pairs, r_pairs = _load_verifier_and_refiner_pairs(
+        valued_trajectories_path=valued_trajectories_path,
+        max_train_samples=verifier_cfg.max_train_samples,
+        task=task,
+    )
+
+    model, tokenizer = load_malt_llama_with_adapters(model_cfg)
+    set_active_role_adapter(model, ROLE_VERIFIER)
+    _run_sft(model, tokenizer, v_pairs, verifier_cfg)
+
+    model, tokenizer = load_malt_llama_with_adapters(model_cfg)
+    set_active_role_adapter(model, ROLE_REFINER)
+    _run_sft(model, tokenizer, r_pairs, refiner_cfg)
