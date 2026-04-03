@@ -35,28 +35,26 @@ class SomadhanExample:
 
 
 def extract_Somadhan_answer(answer_text: str) -> str:
-    text = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.DOTALL)
+    # 1) Check for <answer> tag BEFORE stripping <think> blocks,
+    #    because Qwen3 often places <answer> inside <think>.
+    m = re.search(r"<answer>\s*(.*?)\s*</answer>", answer_text, flags=re.DOTALL)
+    if m:
+        return _bengali_to_arabic(m.group(1).strip())
 
-    # 1) Use the LAST non-empty <answer>...</answer>
-    tag_matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL)
-    if tag_matches:
-        for candidate in reversed(tag_matches):
-            candidate = _bengali_to_arabic(candidate.strip())
-            if candidate != "":
-                return candidate
+    # Now safe to strip <think> blocks (no <answer> tag was inside them).
+    text = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.DOTALL)
 
     # 2) #### marker
     if "####" in text:
         final = text.split("####", maxsplit=1)[-1]
         return _bengali_to_arabic(final.strip())
 
-    # 3) Last numeric token
+    # 3) Last numeric token fallback
     numeric_matches = re.findall(r"-?[\d০-৯]+(?:\.[\d০-৯]+)?", text)
     if numeric_matches:
         return _bengali_to_arabic(numeric_matches[-1].strip())
 
     return _bengali_to_arabic(text.strip())
-
 
 def normalize_Somadhan_answer(text: str) -> str:
     """
@@ -169,6 +167,8 @@ def load_Somadhan_split(
             q_key, a_key = "question", "answer"
         elif "m_query" in fields and "response" in fields:
             q_key, a_key = "m_query", "response"
+        elif "Problem" in fields and "Answer" in fields:
+            q_key, a_key = "Problem", "Answer"
         else:
             raise ValueError(
                 "CSV must have columns (question, answer) or (m_query, response). "
