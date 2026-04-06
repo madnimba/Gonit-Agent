@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, List, Sequence, Union
+from typing import Callable, List, Sequence, Tuple, Union
 
 import torch
 from tqdm.auto import tqdm
@@ -183,6 +183,39 @@ def _majority_vote(
     return best_norm
 
 
+def _majority_vote_and_raw(
+    scored_raw_pairs: List[Tuple[str, str]],
+    extract_fn: Callable[[str], str],
+    normalize_fn: Callable[[str], str],
+) -> Tuple[str, str]:
+    """
+    Majority vote using *scored_raw_pairs* (vote_text, raw_trace).
+
+    *vote_text* is passed through extract+normalize for voting (same as
+    ``_majority_vote``). *raw_trace* is the full model output to keep for logging
+    (e.g. generator completion, or G→V→R sections for MALT).
+    """
+    if not scored_raw_pairs:
+        return "", ""
+
+    norm_counts: Counter = Counter(
+        normalize_fn(extract_fn(vote_src)) for vote_src, _ in scored_raw_pairs
+    )
+    best_norm, _ = norm_counts.most_common(1)[0]
+    for vote_src, raw_trace in scored_raw_pairs:
+        if normalize_fn(extract_fn(vote_src)) == best_norm:
+            return best_norm, raw_trace
+    return best_norm, scored_raw_pairs[-1][1]
+
+
+def _malt_gvr_trace(generator_text: str, verifier_text: str, refiner_text: str) -> str:
+    return (
+        f"### Generator\n{generator_text}\n\n"
+        f"### Verifier\n{verifier_text}\n\n"
+        f"### Refiner\n{refiner_text}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single-agent inference
 # ---------------------------------------------------------------------------
@@ -192,8 +225,11 @@ def run_single_agent_generator(
     tokenizer: PreTrainedTokenizerBase,
     questions: Sequence[AnyExample],
     cfg: InferenceConfig,
-) -> List[str]:
+    *,
+    return_raw: bool = False,
+) -> Union[List[str], List[Tuple[str, str]]]:
     final_answers: List[str] = []
+    final_raws: List[str] = []
     n = len(questions)
 
     # Strategy: batch over examples, and if num_samples>1, do k batched passes.
@@ -232,13 +268,21 @@ def run_single_agent_generator(
 
         for ex, answers in zip(chunk, answers_acc):
             extract_fn, normalize_fn = _get_answer_fns(ex)
-            final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
+            if return_raw:
+                pairs = [(a, a) for a in answers]
+                pred, raw = _majority_vote_and_raw(pairs, extract_fn, normalize_fn)
+                final_answers.append(pred)
+                final_raws.append(raw)
+            else:
+                final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
 
         pbar.update(len(chunk))
         start = end
 
     pbar.close()
 
+    if return_raw:
+        return list(zip(final_answers, final_raws, strict=True))
     return final_answers
 
 
@@ -300,13 +344,15 @@ def run_multi_agent_malt(
     use_lora_generator: bool = True,
     use_lora_verifier: bool = True,
     use_lora_refiner: bool = True,
-) -> List[str]:
+    return_raw: bool = False,
+) -> Union[List[str], List[Tuple[str, str]]]:
     """
     MALT G→V→R chain. For each role, *use_lora_<role>* selects trained LoRA weights;
     if False, that stage runs on the HF base only (``disable_adapter()``), matching
     published GanitLLM without random adapter init.
     """
     final_answers: List[str] = []
+    final_raws: List[str] = []
     n = len(questions)
 
     pbar = tqdm(
@@ -322,8 +368,9 @@ def run_multi_agent_malt(
         end = min(n, start + chunk_size)
         chunk = list(questions[start:end])
 
-        # For each example in chunk, collect cfg.num_samples refined outputs.
-        answers_acc: List[List[str]] = [[] for _ in range(len(chunk))]
+        # For each example, collect (refiner_output, trace). Trace is the full G→V→R
+        # path when *return_raw*; otherwise trace equals the refiner string (no extra work).
+        answers_acc: List[List[Tuple[str, str]]] = [[] for _ in range(len(chunk))]
 
         for _ in range(cfg.num_samples):
             # G stage
@@ -365,17 +412,27 @@ def run_multi_agent_malt(
                 use_lora=use_lora_refiner,
             )
 
-            for i, txt in enumerate(r_texts):
-                answers_acc[i].append(txt)
+            for i, (g_text, v_text, r_text) in enumerate(zip(g_texts, v_texts, r_texts)):
+                trace = (
+                    _malt_gvr_trace(g_text, v_text, r_text)
+                    if return_raw
+                    else r_text
+                )
+                answers_acc[i].append((r_text, trace))
 
-        for ex, answers in zip(chunk, answers_acc):
+        for ex, pairs in zip(chunk, answers_acc):
             extract_fn, normalize_fn = _get_answer_fns(ex)
-            final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
+            pred, raw_trace = _majority_vote_and_raw(pairs, extract_fn, normalize_fn)
+            final_answers.append(pred)
+            if return_raw:
+                final_raws.append(raw_trace)
 
         pbar.update(len(chunk))
         start = end
 
     pbar.close()
+    if return_raw:
+        return list(zip(final_answers, final_raws, strict=True))
     return final_answers
 
 

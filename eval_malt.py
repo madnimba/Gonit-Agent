@@ -255,8 +255,8 @@ def main() -> None:
     base_preds: list[str | None] = [None] * n
     mv_preds:   list[str | None] = [None] * n
     s3_preds:   list[str | None] = [None] * n
-    s4_preds:   list[str | None] = [None] * n
-    s5_preds:   list[str | None] = [None] * n
+    # s4_preds:   list[str | None] = [None] * n
+    # s5_preds:   list[str | None] = [None] * n
     s6_preds:   list[str | None] = [None] * n
 
     if args.resume:
@@ -264,8 +264,8 @@ def main() -> None:
         mv_preds   = _load_cache(_cache_path(out_dir, 2), n)
         if all_ckpt:
             s3_preds = _load_cache(_cache_path(out_dir, 3), n)
-            s4_preds = _load_cache(_cache_path(out_dir, 4), n)
-            s5_preds = _load_cache(_cache_path(out_dir, 5), n)
+            # s4_preds = _load_cache(_cache_path(out_dir, 4), n)
+            # s5_preds = _load_cache(_cache_path(out_dir, 5), n)
             s6_preds = _load_cache(_cache_path(out_dir, 6), n)
 
     if verbose:

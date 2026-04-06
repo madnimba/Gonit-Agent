@@ -15,6 +15,8 @@ Phases 3–6 require all three checkpoints: --gen-checkpoint, --ver-checkpoint, 
 Resume + chunking:
   Use --resume to skip examples already present in per-phase caches under:
     <output-dir>/cache/<phase_tag>.jsonl
+  Cache lines may include optional "raw_output" (full model trace). Older caches
+  without it still resume predictions; eval_predictions.jsonl may omit raw for those rows.
   Add --chunk-size N to evaluate missing examples in batches (for speed).
 """
 
@@ -73,10 +75,13 @@ def _cache_path(out_dir: Path, phase_num: int) -> Path:
     return out_dir / CACHE_DIRNAME / f"{_phase_tag(phase_num)}{CACHE_SUFFIX}"
 
 
-def _load_cache(cache_path: Path, n_expected: int) -> list[str | None]:
+def _load_cache(
+    cache_path: Path, n_expected: int
+) -> tuple[list[str | None], list[str | None]]:
     preds: list[str | None] = [None] * n_expected
+    raws: list[str | None] = [None] * n_expected
     if not cache_path.exists():
-        return preds
+        return preds, raws
     with cache_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -90,23 +95,36 @@ def _load_cache(cache_path: Path, n_expected: int) -> list[str | None]:
             pred = rec.get("pred", None)
             if isinstance(idx, int) and 0 <= idx < n_expected and isinstance(pred, str):
                 preds[idx] = pred
-    return preds
+                ro = rec.get("raw_output", None)
+                if isinstance(ro, str):
+                    raws[idx] = ro
+    return preds, raws
 
 
-def _append_cache_line(cache_path: Path, idx: int, pred: str) -> None:
+def _append_cache_line(cache_path: Path, idx: int, pred: str, raw_output: str | None = None) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
+    rec: dict[str, Any] = {"idx": idx, "pred": pred}
+    if raw_output is not None:
+        rec["raw_output"] = raw_output
     with cache_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"idx": idx, "pred": pred}, ensure_ascii=False) + "\n")
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         f.flush()
 
 
-def _phase_record(title: str, raw_text: str, ground_truth: str) -> dict[str, Any]:
-    extracted = extract_Somadhan_answer(raw_text)
+def _phase_record(
+    title: str,
+    pred_voted: str,
+    ground_truth: str,
+    *,
+    model_output_raw: str | None,
+) -> dict[str, Any]:
+    src = model_output_raw if model_output_raw is not None else pred_voted
+    extracted = extract_Somadhan_answer(src)
     return {
         "phase_title": title,
-        "model_output_raw": raw_text,
+        "model_output_raw": model_output_raw,
         "answer_extracted": extracted,
-        "answer_correctness": Somadhan_exact_match(raw_text, ground_truth),
+        "answer_correctness": Somadhan_exact_match(pred_voted, ground_truth),
     }
 
 
@@ -194,22 +212,28 @@ def main() -> None:
             flush=True,
         )
 
-    # Per-phase cached predictions.
+    # Per-phase cached predictions and optional full model traces (thinking path).
     base_preds: list[str | None] = [None] * n
+    base_raws: list[str | None] = [None] * n
     mv_preds: list[str | None] = [None] * n
+    mv_raws: list[str | None] = [None] * n
     s3_preds: list[str | None] = [None] * n
+    s3_raws: list[str | None] = [None] * n
     s4_preds: list[str | None] = [None] * n
+    s4_raws: list[str | None] = [None] * n
     s5_preds: list[str | None] = [None] * n
+    s5_raws: list[str | None] = [None] * n
     s6_preds: list[str | None] = [None] * n
+    s6_raws: list[str | None] = [None] * n
 
     if args.resume:
-        base_preds = _load_cache(_cache_path(out_dir, 1), n)
-        mv_preds = _load_cache(_cache_path(out_dir, 2), n)
+        base_preds, base_raws = _load_cache(_cache_path(out_dir, 1), n)
+        mv_preds, mv_raws = _load_cache(_cache_path(out_dir, 2), n)
         if all_ckpt:
-            s3_preds = _load_cache(_cache_path(out_dir, 3), n)
-            s4_preds = _load_cache(_cache_path(out_dir, 4), n)
-            s5_preds = _load_cache(_cache_path(out_dir, 5), n)
-            s6_preds = _load_cache(_cache_path(out_dir, 6), n)
+            s3_preds, s3_raws = _load_cache(_cache_path(out_dir, 3), n)
+            s4_preds, s4_raws = _load_cache(_cache_path(out_dir, 4), n)
+            s5_preds, s5_raws = _load_cache(_cache_path(out_dir, 5), n)
+            s6_preds, s6_raws = _load_cache(_cache_path(out_dir, 6), n)
 
     phase_times: list[float] = []
 
@@ -240,11 +264,14 @@ def main() -> None:
             unit="chunk",
         ):
             subset = [examples[i] for i in idx_chunk]
-            preds_chunk = run_single_agent_generator(model, tok, subset, base_cfg_one)
+            preds_chunk = run_single_agent_generator(
+                model, tok, subset, base_cfg_one, return_raw=True
+            )
             for local_pos, i in enumerate(idx_chunk):
-                pred = preds_chunk[local_pos]
+                pred, raw_out = preds_chunk[local_pos]
                 base_preds[i] = pred
-                _append_cache_line(_cache_path(out_dir, 1), i, pred)
+                base_raws[i] = raw_out
+                _append_cache_line(_cache_path(out_dir, 1), i, pred, raw_out)
         _log_phase_eta(verbose, "Phase 1", t_phase, phase_times, total_phases)
     elif verbose:
         print("Skipping phase 1 (all cached).", flush=True)
@@ -263,11 +290,14 @@ def main() -> None:
             unit="chunk",
         ):
             subset = [examples[i] for i in idx_chunk]
-            preds_chunk = run_single_agent_generator(model, tok, subset, mv_cfg_one)
+            preds_chunk = run_single_agent_generator(
+                model, tok, subset, mv_cfg_one, return_raw=True
+            )
             for local_pos, i in enumerate(idx_chunk):
-                pred = preds_chunk[local_pos]
+                pred, raw_out = preds_chunk[local_pos]
                 mv_preds[i] = pred
-                _append_cache_line(_cache_path(out_dir, 2), i, pred)
+                mv_raws[i] = raw_out
+                _append_cache_line(_cache_path(out_dir, 2), i, pred, raw_out)
         _log_phase_eta(verbose, "Phase 2", t_phase, phase_times, total_phases)
     elif verbose:
         print("Skipping phase 2 (all cached).", flush=True)
@@ -299,6 +329,7 @@ def main() -> None:
             verifier_ckpt: str | None,
             refiner_ckpt: str | None,
             pred_store: list[str | None],
+            raw_store: list[str | None],
         ) -> EvalStats:
             missing = [i for i, p in enumerate(pred_store) if p is None]
             if not missing:
@@ -336,11 +367,13 @@ def main() -> None:
                     use_lora_generator=generator_ckpt is not None,
                     use_lora_verifier=verifier_ckpt is not None,
                     use_lora_refiner=refiner_ckpt is not None,
+                    return_raw=True,
                 )
                 for local_pos, i in enumerate(idx_chunk):
-                    pred = preds_chunk[local_pos]
+                    pred, raw_out = preds_chunk[local_pos]
                     pred_store[i] = pred
-                    _append_cache_line(cache_path, i, pred)
+                    raw_store[i] = raw_out
+                    _append_cache_line(cache_path, i, pred, raw_out)
 
             _log_phase_eta(verbose, f"Phase {phase_num}", t_phase, phase_times, total_phases)
             stats = evaluate_somadhan_predictions([p for p in pred_store if p is not None], gt_answers)
@@ -351,10 +384,42 @@ def main() -> None:
                 torch.cuda.empty_cache()
             return stats
 
-        s3_stats = run_malt_phase(3, "HF-base gen + trained ver/ref", None, args.ver_checkpoint, args.ref_checkpoint, s3_preds)
-        s4_stats = run_malt_phase(4, "trained gen/ref + HF-base ver", args.gen_checkpoint, None, args.ref_checkpoint, s4_preds)
-        s5_stats = run_malt_phase(5, "trained gen/ver + HF-base ref", args.gen_checkpoint, args.ver_checkpoint, None, s5_preds)
-        s6_stats = run_malt_phase(6, "trained gen + ver + ref", args.gen_checkpoint, args.ver_checkpoint, args.ref_checkpoint, s6_preds)
+        s3_stats = run_malt_phase(
+            3,
+            "HF-base gen + trained ver/ref",
+            None,
+            args.ver_checkpoint,
+            args.ref_checkpoint,
+            s3_preds,
+            s3_raws,
+        )
+        s4_stats = run_malt_phase(
+            4,
+            "trained gen/ref + HF-base ver",
+            args.gen_checkpoint,
+            None,
+            args.ref_checkpoint,
+            s4_preds,
+            s4_raws,
+        )
+        s5_stats = run_malt_phase(
+            5,
+            "trained gen/ver + HF-base ref",
+            args.gen_checkpoint,
+            args.ver_checkpoint,
+            None,
+            s5_preds,
+            s5_raws,
+        )
+        s6_stats = run_malt_phase(
+            6,
+            "trained gen + ver + ref",
+            args.gen_checkpoint,
+            args.ver_checkpoint,
+            args.ref_checkpoint,
+            s6_preds,
+            s6_raws,
+        )
 
         malt_ablation_stats = (s3_stats, s4_stats, s5_stats, s6_stats)
 
@@ -374,14 +439,44 @@ def main() -> None:
                 "id": ex.id,
                 "question": ex.question,
                 "ground_truth": gt,
-                "phase_1_base_zero_shot": _phase_record(p1, base_preds[i], gt),  # type: ignore[arg-type]
-                "phase_2_base_mv": _phase_record(p2, mv_preds[i], gt),  # type: ignore[arg-type]
+                "phase_1_base_zero_shot": _phase_record(
+                    p1,
+                    base_preds[i],  # type: ignore[arg-type]
+                    gt,
+                    model_output_raw=base_raws[i],
+                ),
+                "phase_2_base_mv": _phase_record(
+                    p2,
+                    mv_preds[i],  # type: ignore[arg-type]
+                    gt,
+                    model_output_raw=mv_raws[i],
+                ),
             }
             if all_ckpt:
-                record["phase_3_malt_untrained_generator"] = _phase_record(p3, s3_preds[i], gt)  # type: ignore[arg-type]
-                record["phase_4_malt_untrained_verifier"] = _phase_record(p4, s4_preds[i], gt)  # type: ignore[arg-type]
-                record["phase_5_malt_untrained_refiner"] = _phase_record(p5, s5_preds[i], gt)  # type: ignore[arg-type]
-                record["phase_6_malt_fully_trained"] = _phase_record(p6, s6_preds[i], gt)  # type: ignore[arg-type]
+                record["phase_3_malt_untrained_generator"] = _phase_record(
+                    p3,
+                    s3_preds[i],  # type: ignore[arg-type]
+                    gt,
+                    model_output_raw=s3_raws[i],
+                )
+                record["phase_4_malt_untrained_verifier"] = _phase_record(
+                    p4,
+                    s4_preds[i],  # type: ignore[arg-type]
+                    gt,
+                    model_output_raw=s4_raws[i],
+                )
+                record["phase_5_malt_untrained_refiner"] = _phase_record(
+                    p5,
+                    s5_preds[i],  # type: ignore[arg-type]
+                    gt,
+                    model_output_raw=s5_raws[i],
+                )
+                record["phase_6_malt_fully_trained"] = _phase_record(
+                    p6,
+                    s6_preds[i],  # type: ignore[arg-type]
+                    gt,
+                    model_output_raw=s6_raws[i],
+                )
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     summary = _eval_summary_lines(args.num_samples, base_stats, mv_stats, malt_ablation_stats)
